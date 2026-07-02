@@ -14,6 +14,10 @@ export async function GET(request: Request) {
     if (!error) {
       return NextResponse.redirect(`${origin}${next}`);
     }
+
+    const loginUrl = new URL(`${origin}/login`);
+    loginUrl.searchParams.set("verified", "1");
+    return NextResponse.redirect(loginUrl);
   }
 
   return NextResponse.redirect(`${origin}/login`);

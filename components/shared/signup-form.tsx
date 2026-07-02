@@ -28,9 +28,14 @@ export function SignupForm() {
     setSuccess(null);
 
     const supabase = createClient();
+    const emailRedirectTo = `${window.location.origin}/auth/callback?next=/projects`;
+
     const { data, error: signUpError } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        emailRedirectTo,
+      },
     });
 
     if (signUpError) {
