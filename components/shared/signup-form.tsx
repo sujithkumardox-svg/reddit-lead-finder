@@ -7,6 +7,7 @@ import { useState } from "react";
 import { AuthCard } from "@/components/shared/auth/auth-card";
 import { AuthField } from "@/components/shared/auth/auth-field";
 import { AuthLegalFooter } from "@/components/shared/auth/auth-legal-footer";
+import { GoogleOAuthSection } from "@/components/shared/auth/google-oauth-section";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { PasswordInput } from "@/components/shared/auth/password-input";
 import { Button } from "@/components/ui/button";
@@ -18,8 +19,11 @@ export function SignupForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const isBusy = loading || oauthLoading;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -62,7 +66,7 @@ export function SignupForm() {
       title="Create your account"
       description="Start finding high-intent Reddit leads with AI-powered discovery and outreach tools."
       footer={
-        <>
+        <div className="flex w-full flex-col gap-3">
           <p className="text-center text-sm text-muted-foreground">
             Already have an account?{" "}
             <Link
@@ -73,45 +77,57 @@ export function SignupForm() {
             </Link>
           </p>
           <AuthLegalFooter />
-        </>
+        </div>
       }
     >
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <AuthField id="email" label="Email">
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-            autoComplete="email"
-            disabled={loading}
-          />
-        </AuthField>
+      <div className="flex flex-col gap-4">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <AuthField id="email" label="Email">
+            <Input
+              id="email"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+              autoComplete="email"
+              disabled={isBusy}
+            />
+          </AuthField>
 
-        <AuthField id="password" label="Password">
-          <PasswordInput
-            id="password"
-            value={password}
-            onChange={setPassword}
-            placeholder="At least 6 characters"
-            autoComplete="new-password"
-            disabled={loading}
-            minLength={6}
-          />
-        </AuthField>
+          <AuthField id="password" label="Password">
+            <PasswordInput
+              id="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="At least 6 characters"
+              autoComplete="new-password"
+              disabled={isBusy}
+              minLength={6}
+            />
+          </AuthField>
 
-        {loading && (
-          <AuthMessage variant="loading">Creating account…</AuthMessage>
-        )}
-        {error && <AuthMessage variant="error">{error}</AuthMessage>}
-        {success && <AuthMessage variant="success">{success}</AuthMessage>}
+          {loading && (
+            <AuthMessage variant="loading">Creating account…</AuthMessage>
+          )}
+          {error && <AuthMessage variant="error">{error}</AuthMessage>}
+          {success && <AuthMessage variant="success">{success}</AuthMessage>}
 
-        <Button type="submit" className="w-full" size="lg" disabled={loading}>
-          {loading ? "Creating account…" : "Create account"}
-        </Button>
-      </form>
+          <Button type="submit" className="w-full" size="lg" disabled={isBusy}>
+            {loading ? "Creating account…" : "Create account"}
+          </Button>
+        </form>
+
+        <GoogleOAuthSection
+          disabled={loading}
+          onLoadingChange={setOauthLoading}
+          onError={setError}
+          onClearMessages={() => {
+            setError(null);
+            setSuccess(null);
+          }}
+        />
+      </div>
     </AuthCard>
   );
 }

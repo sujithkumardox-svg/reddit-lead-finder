@@ -9,7 +9,7 @@ type AuthFieldProps = {
 
 export function AuthField({ id, label, children, className }: AuthFieldProps) {
   return (
-    <div className={cn("flex flex-col gap-2", className)}>
+    <div className={cn("flex flex-col gap-1.5", className)}>
       <label htmlFor={id} className="text-sm font-medium text-foreground">
         {label}
       </label>

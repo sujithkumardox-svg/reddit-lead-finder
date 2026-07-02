@@ -7,6 +7,7 @@ import { useState } from "react";
 import { AuthCard } from "@/components/shared/auth/auth-card";
 import { AuthField } from "@/components/shared/auth/auth-field";
 import { AuthLegalFooter } from "@/components/shared/auth/auth-legal-footer";
+import { GoogleOAuthSection } from "@/components/shared/auth/google-oauth-section";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { PasswordInput } from "@/components/shared/auth/password-input";
 import { Button } from "@/components/ui/button";
@@ -18,10 +19,13 @@ export function LoginForm({ verifiedEmail = false }: { verifiedEmail?: boolean }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(
     verifiedEmail ? "Your email has been verified. You can now log in." : null,
   );
+
+  const isBusy = loading || oauthLoading;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -51,7 +55,7 @@ export function LoginForm({ verifiedEmail = false }: { verifiedEmail?: boolean }
       title="Welcome back"
       description="Sign in to your Reddit Lead Finder account to access your projects and leads."
       footer={
-        <>
+        <div className="flex w-full flex-col gap-3">
           <p className="text-center text-sm text-muted-foreground">
             Don&apos;t have an account?{" "}
             <Link
@@ -62,51 +66,63 @@ export function LoginForm({ verifiedEmail = false }: { verifiedEmail?: boolean }
             </Link>
           </p>
           <AuthLegalFooter />
-        </>
+        </div>
       }
     >
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <AuthField id="email" label="Email">
-          <Input
-            id="email"
-            type="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-            autoComplete="email"
-            disabled={loading}
-          />
-        </AuthField>
+      <div className="flex flex-col gap-4">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <AuthField id="email" label="Email">
+            <Input
+              id="email"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+              autoComplete="email"
+              disabled={isBusy}
+            />
+          </AuthField>
 
-        <AuthField id="password" label="Password">
-          <PasswordInput
-            id="password"
-            value={password}
-            onChange={setPassword}
-            placeholder="Your password"
-            autoComplete="current-password"
-            disabled={loading}
-            minLength={6}
-          />
-          <div className="flex justify-end">
-            <Link
-              href="/forgot-password"
-              className="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-sm"
-            >
-              Forgot password?
-            </Link>
-          </div>
-        </AuthField>
+          <AuthField id="password" label="Password">
+            <PasswordInput
+              id="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="Your password"
+              autoComplete="current-password"
+              disabled={isBusy}
+              minLength={6}
+            />
+            <div className="flex justify-end">
+              <Link
+                href="/forgot-password"
+                className="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-sm"
+              >
+                Forgot password?
+              </Link>
+            </div>
+          </AuthField>
 
-        {loading && <AuthMessage variant="loading">Signing in…</AuthMessage>}
-        {error && <AuthMessage variant="error">{error}</AuthMessage>}
-        {success && <AuthMessage variant="success">{success}</AuthMessage>}
+          {loading && <AuthMessage variant="loading">Signing in…</AuthMessage>}
+          {error && <AuthMessage variant="error">{error}</AuthMessage>}
+          {success && <AuthMessage variant="success">{success}</AuthMessage>}
 
-        <Button type="submit" className="w-full" size="lg" disabled={loading}>
-          {loading ? "Signing in…" : "Log in"}
-        </Button>
-      </form>
+          <Button type="submit" className="w-full" size="lg" disabled={isBusy}>
+            {loading ? "Signing in…" : "Log in"}
+          </Button>
+        </form>
+
+        <GoogleOAuthSection
+          disabled={loading}
+          onLoadingChange={setOauthLoading}
+          onError={setError}
+          onClearMessages={() => {
+            setError(null);
+            setSuccess(null);
+          }}
+        />
+      </div>
     </AuthCard>
   );
 }

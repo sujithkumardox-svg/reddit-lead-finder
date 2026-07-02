@@ -27,7 +27,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="flex flex-1 flex-col">
-        <header className="flex items-center justify-between px-4 py-5 sm:px-6 lg:px-10">
+        <header className="flex items-center justify-between px-4 py-3 sm:px-6 lg:px-10">
           <p className="text-base font-semibold tracking-tight lg:hidden">
             Reddit Lead Finder
           </p>
@@ -39,7 +39,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
           </Link>
         </header>
 
-        <main className="flex flex-1 flex-col items-center justify-center px-4 pb-10 sm:px-6 lg:px-10">
+        <main className="flex flex-1 flex-col items-center justify-center px-4 pb-4 pt-1 sm:px-6 lg:px-10">
           <div className="w-full max-w-md">{children}</div>
         </main>
       </div>
