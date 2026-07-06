@@ -48,17 +48,20 @@ export function PasswordInput({
         type="button"
         variant="ghost"
         size="icon-sm"
-        className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+        className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground transition-[color,background-color,transform] hover:text-foreground"
         onClick={() => setShowPassword((current) => !current)}
         disabled={disabled}
         aria-label={showPassword ? "Hide password" : "Show password"}
         aria-pressed={showPassword}
       >
-        {showPassword ? (
-          <EyeOff className="size-4" aria-hidden="true" />
-        ) : (
-          <Eye className="size-4" aria-hidden="true" />
-        )}
+        <Eye
+          className={cn("size-4", showPassword && "hidden")}
+          aria-hidden="true"
+        />
+        <EyeOff
+          className={cn("size-4", !showPassword && "hidden")}
+          aria-hidden="true"
+        />
       </Button>
     </div>
   );
