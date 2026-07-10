@@ -1,13 +1,13 @@
 import "server-only";
 
-import { openai } from "@ai-sdk/openai";
+import { google } from "@ai-sdk/google";
 import { generateObject } from "ai";
 import { z } from "zod";
 
 import { fetchWebsiteContent } from "@/lib/ai/fetch-website-content";
 import type { WebsiteAnalysis } from "@/types/project";
 
-const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
+const AI_MODEL = process.env.AI_MODEL || "gemini-3.5-flash";
 
 const websiteAnalysisSchema = z.object({
   description: z
@@ -65,7 +65,7 @@ export async function analyzeWebsite(url: string): Promise<WebsiteAnalysis> {
     .join("\n\n");
 
   const { object } = await generateObject({
-    model: openai(AI_MODEL),
+    model: google(AI_MODEL),
     schema: websiteAnalysisSchema,
     system:
       "You are a market research assistant for a Reddit lead-generation tool. Given a website's content, infer what the business does and generate structured data used to find potential customers discussing related problems on Reddit. Be specific to this business, not generic. Respond only with data grounded in the provided content.",

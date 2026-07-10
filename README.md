@@ -26,8 +26,8 @@ Copy `.env.local` and set the following:
 | --- | --- | --- |
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL. |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Yes | Supabase anon/publishable key. |
-| `OPENAI_API_KEY` | Yes | Server-only. Powers the AI website analysis used when creating a project (`/projects/new`). Never expose this with a `NEXT_PUBLIC_` prefix. |
-| `AI_MODEL` | No | OpenAI model id used for website analysis. Defaults to `gpt-4o-mini`. |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Yes | Server-only. Powers the AI website analysis used when creating a project (`/projects/new`). Never expose this with a `NEXT_PUBLIC_` prefix. |
+| `AI_MODEL` | No | Google Gemini model id used for website analysis. Defaults to `gemini-3.5-flash`. |
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
