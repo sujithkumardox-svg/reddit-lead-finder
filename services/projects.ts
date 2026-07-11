@@ -51,6 +51,12 @@ export async function createProject(
     if (error.code === "23505") {
       throw new Error("You already have a project for this website.");
     }
+    console.error("createProject Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
     throw new Error("Failed to create project. Please try again.");
   }
 
