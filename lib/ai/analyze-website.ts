@@ -37,7 +37,9 @@ const websiteAnalysisSchema = z.object({
     ),
   competitors: z
     .array(z.string())
-    .describe("Up to 5 real competitor product or company names."),
+    .describe(
+      "Generate up to 5 real, direct competitors that solve a very similar problem for the same target audience as this business. Return only real, existing companies. Never invent or hallucinate company names. If fewer than 5 highly relevant competitors exist, return fewer competitors instead of guessing. Do not include unrelated software, companies from different industries, or generic tools. Avoid duplicate competitors. Return only competitor names with no descriptions, explanations, website URLs, numbering, markdown, or extra text.",
+    ),
   hiddenSubreddits: z
     .array(z.string())
     .describe(
