@@ -6,6 +6,7 @@ import { Globe, Loader2 } from "lucide-react";
 
 import { analyzeWebsiteAction, createProjectAction } from "@/actions/projects";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
+import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import type { ProjectDraft } from "@/types/project";
 
 type Step = "input" | "analyzing" | "review";
@@ -161,13 +161,10 @@ export function NewProjectWizard() {
           <label htmlFor="description" className="text-sm font-medium text-foreground">
             Business description
           </label>
-          <Textarea
+          <BusinessDescriptionField
             id="description"
             value={draft.description}
-            rows={3}
-            onChange={(event) =>
-              setDraft({ ...draft, description: event.target.value })
-            }
+            onChange={(description) => setDraft({ ...draft, description })}
           />
         </div>
 

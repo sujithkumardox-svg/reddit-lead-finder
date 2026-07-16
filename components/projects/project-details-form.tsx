@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { updateProjectAction } from "@/actions/projects";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
+import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +14,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
 import type { Project } from "@/types/project";
 
 type EditableFields = Pick<
@@ -90,12 +90,9 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
           <CardTitle>Business description</CardTitle>
         </CardHeader>
         <CardContent>
-          <Textarea
+          <BusinessDescriptionField
             value={fields.description}
-            rows={3}
-            onChange={(event) =>
-              setFields({ ...fields, description: event.target.value })
-            }
+            onChange={(description) => setFields({ ...fields, description })}
           />
         </CardContent>
       </Card>
