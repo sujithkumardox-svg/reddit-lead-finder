@@ -157,47 +157,77 @@ export function NewProjectWizard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="description" className="text-sm font-medium text-foreground">
-            Business description
-          </label>
-          <BusinessDescriptionField
-            id="description"
-            value={draft.description}
-            onChange={(description) => setDraft({ ...draft, description })}
-          />
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Business description</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <BusinessDescriptionField
+              value={draft.description}
+              onChange={(description) => setDraft({ ...draft, description })}
+            />
+          </CardContent>
+        </Card>
 
-        <EditableListField
-          label="Keywords"
-          description="Terms people use when discussing this space."
-          items={draft.keywords}
-          onChange={(keywords) => setDraft({ ...draft, keywords })}
-          placeholder="Add a keyword…"
-        />
+        <Card>
+          <CardHeader>
+            <CardTitle>Keywords</CardTitle>
+            <CardDescription>{draft.keywords.length} total</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EditableListField
+              label=""
+              items={draft.keywords}
+              onChange={(keywords) => setDraft({ ...draft, keywords })}
+              placeholder="Add a keyword…"
+            />
+          </CardContent>
+        </Card>
 
-        <EditableListField
-          label="Intent phrases"
-          description="Phrases that signal someone is looking for a solution."
-          items={draft.intentPhrases}
-          onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
-          placeholder="Add an intent phrase…"
-        />
+        <Card>
+          <CardHeader>
+            <CardTitle>Intent phrases</CardTitle>
+            <CardDescription>{draft.intentPhrases.length} total</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EditableListField
+              label=""
+              items={draft.intentPhrases}
+              onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
+              placeholder="Add an intent phrase…"
+            />
+          </CardContent>
+        </Card>
 
-        <EditableListField
-          label="Pain phrases"
-          description="Phrases that signal frustration with the problem you solve."
-          items={draft.painPhrases}
-          onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
-          placeholder="Add a pain phrase…"
-        />
+        <Card>
+          <CardHeader>
+            <CardTitle>Pain phrases</CardTitle>
+            <CardDescription>{draft.painPhrases.length} total</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EditableListField
+              label=""
+              items={draft.painPhrases}
+              onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
+              placeholder="Add a pain phrase…"
+            />
+          </CardContent>
+        </Card>
 
-        <EditableListField
-          label="Competitors"
-          items={draft.competitors}
-          onChange={(competitors) => setDraft({ ...draft, competitors })}
-          placeholder="Add a competitor…"
-        />
+        <Card>
+          <CardHeader>
+            <CardTitle>Competitors</CardTitle>
+            <CardDescription>{draft.competitors.length} total</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EditableListField
+              label=""
+              items={draft.competitors}
+              onChange={(competitors) => setDraft({ ...draft, competitors })}
+              placeholder="Add a competitor…"
+            />
+          </CardContent>
+        </Card>
 
         {error && <AuthMessage variant="error">{error}</AuthMessage>}
       </CardContent>
