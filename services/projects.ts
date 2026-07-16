@@ -63,6 +63,49 @@ export async function createProject(
   return data.id as string;
 }
 
+export type UpdateProjectInput = {
+  description: string;
+  keywords: string[];
+  intentPhrases: string[];
+  painPhrases: string[];
+  competitors: string[];
+};
+
+/**
+ * Updates only the editable onboarding fields of an existing project. Never
+ * touches `name`, `website_url`, `hidden_keywords`, `subreddits`, or any
+ * other column - this does not rerun AI onboarding or regenerate content.
+ */
+export async function updateProject(
+  userId: string,
+  projectId: string,
+  input: UpdateProjectInput,
+): Promise<void> {
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("projects")
+    .update({
+      description: input.description,
+      keywords: input.keywords,
+      intent_phrases: input.intentPhrases,
+      pain_phrases: input.painPhrases,
+      competitors: input.competitors,
+    })
+    .eq("user_id", userId)
+    .eq("id", projectId);
+
+  if (error) {
+    console.error("updateProject Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to save changes. Please try again.");
+  }
+}
+
 export async function listProjects(userId: string): Promise<ProjectSummary[]> {
   const supabase = await createClient();
 

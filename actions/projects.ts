@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import { analyzeWebsite } from "@/lib/ai/analyze-website";
 import { deriveProjectNameFromUrl, normalizeWebsiteUrl } from "@/lib/ai/website-url";
 import { createClient } from "@/lib/supabase/server";
-import { createProject } from "@/services/projects";
+import { createProject, updateProject } from "@/services/projects";
 import type { ProjectDraft } from "@/types/project";
 
 export type ActionResult<T> =
@@ -105,6 +105,57 @@ export async function createProjectAction(
     return {
       ok: false,
       error: error instanceof Error ? error.message : "Failed to create project.",
+    };
+  }
+}
+
+export type UpdateProjectFields = {
+  description: string;
+  keywords: string[];
+  intentPhrases: string[];
+  painPhrases: string[];
+  competitors: string[];
+};
+
+/**
+ * Persists edits made on the Project Details page. Only updates the
+ * editable onboarding fields on the existing project row - never reruns AI
+ * onboarding and never touches fields the user didn't edit.
+ */
+export async function updateProjectAction(
+  projectId: string,
+  fields: UpdateProjectFields,
+): Promise<ActionResult<null>> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { ok: false, error: "You must be signed in to save changes." };
+  }
+
+  const description = fields.description.trim();
+  if (!description) {
+    return { ok: false, error: "Business description can't be empty." };
+  }
+
+  try {
+    await updateProject(user.id, projectId, {
+      description,
+      keywords: sanitizeList(fields.keywords),
+      intentPhrases: sanitizeList(fields.intentPhrases),
+      painPhrases: sanitizeList(fields.painPhrases),
+      competitors: sanitizeList(fields.competitors),
+    });
+
+    revalidatePath(`/projects/${projectId}`);
+
+    return { ok: true, data: null };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to save changes.",
     };
   }
 }

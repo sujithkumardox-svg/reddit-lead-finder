@@ -1,13 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { ProjectDetailsForm } from "@/components/projects/project-details-form";
 import { createClient } from "@/lib/supabase/server";
 import { getProjectById } from "@/services/projects";
 
@@ -46,45 +39,7 @@ export default async function ProjectPage({
         </a>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Business description</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            {project.description || "No description yet."}
-          </p>
-        </CardContent>
-      </Card>
-
-      <FieldListCard title="Keywords" items={project.keywords} />
-      <FieldListCard title="Intent phrases" items={project.intentPhrases} />
-      <FieldListCard title="Pain phrases" items={project.painPhrases} />
-      <FieldListCard title="Competitors" items={project.competitors} />
+      <ProjectDetailsForm project={project} />
     </main>
-  );
-}
-
-function FieldListCard({ title, items }: { title: string; items: string[] }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>{items.length} total</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">None yet.</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {items.map((item) => (
-              <Badge key={item} variant="secondary">
-                {item}
-              </Badge>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
   );
 }

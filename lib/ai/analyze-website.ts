@@ -43,7 +43,7 @@ const websiteAnalysisSchema = z.object({
   hiddenSubreddits: z
     .array(z.string())
     .describe(
-      "Exactly 10 subreddit names (no 'r/' prefix) most likely to contain people discussing this problem space. This list is never shown to the end user.",
+      "Exactly 10 real subreddit names (no 'r/' prefix) where this business's target audience actively discusses this problem, asks related questions, seeks recommendations, or shares relevant experiences. Prefer active, relevant subreddits over broad or unrelated ones. Return only subreddit names with no explanations. This list is never shown to the end user.",
     ),
 });
 
