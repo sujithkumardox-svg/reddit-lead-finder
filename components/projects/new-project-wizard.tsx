@@ -259,21 +259,9 @@ export function NewProjectWizard() {
 
         {error && <AuthMessage variant="error">{error}</AuthMessage>}
       </CardContent>
-      <CardFooter className="flex justify-between gap-3">
-        <Button
-          type="button"
-          variant="outline"
-          disabled={creating}
-          onClick={() => {
-            setDraft(null);
-            setError(null);
-            setStep("input");
-          }}
-        >
-          Start over
-        </Button>
+      <CardFooter className="flex justify-end gap-3">
         <Button type="button" size="lg" disabled={creating} onClick={handleCreate}>
-          {creating ? "Creating…" : "Create project"}
+          {creating ? "Saving…" : "Save Project"}
         </Button>
       </CardFooter>
     </Card>
