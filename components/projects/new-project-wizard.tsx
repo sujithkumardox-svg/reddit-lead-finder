@@ -35,9 +35,19 @@ export function NewProjectWizard() {
   const [step, setStep] = useState<Step>("input");
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
+  const [originalDraft, setOriginalDraft] = useState<ProjectDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [messageIndex, setMessageIndex] = useState(0);
+
+  const isDirty =
+    draft !== null &&
+    originalDraft !== null &&
+    (draft.description !== originalDraft.description ||
+      JSON.stringify(draft.keywords) !== JSON.stringify(originalDraft.keywords) ||
+      JSON.stringify(draft.intentPhrases) !== JSON.stringify(originalDraft.intentPhrases) ||
+      JSON.stringify(draft.painPhrases) !== JSON.stringify(originalDraft.painPhrases) ||
+      JSON.stringify(draft.competitors) !== JSON.stringify(originalDraft.competitors));
 
   useEffect(() => {
     if (step !== "analyzing") return;
@@ -48,6 +58,18 @@ export function NewProjectWizard() {
 
     return () => clearInterval(interval);
   }, [step]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
 
   async function handleAnalyze(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -64,6 +86,7 @@ export function NewProjectWizard() {
     }
 
     setDraft(result.data);
+    setOriginalDraft(result.data);
     setStep("review");
   }
 
@@ -80,6 +103,7 @@ export function NewProjectWizard() {
       return;
     }
 
+    setOriginalDraft(draft);
     router.push(`/projects/${result.data.id}`);
     router.refresh();
   }
