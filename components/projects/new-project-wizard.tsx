@@ -172,7 +172,7 @@ export function NewProjectWizard() {
         <Card>
           <CardHeader>
             <CardTitle>Keywords</CardTitle>
-            <CardDescription>{draft.keywords.length} total</CardDescription>
+            <CardDescription>{draft.keywords.length}/20 keywords</CardDescription>
           </CardHeader>
           <CardContent>
             <EditableListField
@@ -180,6 +180,7 @@ export function NewProjectWizard() {
               items={draft.keywords}
               onChange={(keywords) => setDraft({ ...draft, keywords })}
               placeholder="Add a keyword…"
+              maxItems={20}
             />
           </CardContent>
         </Card>
@@ -187,7 +188,7 @@ export function NewProjectWizard() {
         <Card>
           <CardHeader>
             <CardTitle>Intent phrases</CardTitle>
-            <CardDescription>{draft.intentPhrases.length} total</CardDescription>
+            <CardDescription>{draft.intentPhrases.length}/15 intent phrases</CardDescription>
           </CardHeader>
           <CardContent>
             <EditableListField
@@ -195,6 +196,7 @@ export function NewProjectWizard() {
               items={draft.intentPhrases}
               onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
               placeholder="Add an intent phrase…"
+              maxItems={15}
             />
           </CardContent>
         </Card>
@@ -202,7 +204,7 @@ export function NewProjectWizard() {
         <Card>
           <CardHeader>
             <CardTitle>Pain phrases</CardTitle>
-            <CardDescription>{draft.painPhrases.length} total</CardDescription>
+            <CardDescription>{draft.painPhrases.length}/15 pain phrases</CardDescription>
           </CardHeader>
           <CardContent>
             <EditableListField
@@ -210,6 +212,7 @@ export function NewProjectWizard() {
               items={draft.painPhrases}
               onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
               placeholder="Add a pain phrase…"
+              maxItems={15}
             />
           </CardContent>
         </Card>
@@ -217,7 +220,7 @@ export function NewProjectWizard() {
         <Card>
           <CardHeader>
             <CardTitle>Competitors</CardTitle>
-            <CardDescription>{draft.competitors.length} total</CardDescription>
+            <CardDescription>{draft.competitors.length}/5 competitors</CardDescription>
           </CardHeader>
           <CardContent>
             <EditableListField
@@ -225,6 +228,7 @@ export function NewProjectWizard() {
               items={draft.competitors}
               onChange={(competitors) => setDraft({ ...draft, competitors })}
               placeholder="Add a competitor…"
+              maxItems={5}
             />
           </CardContent>
         </Card>

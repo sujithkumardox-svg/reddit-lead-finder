@@ -13,6 +13,7 @@ type EditableListFieldProps = {
   onChange: (items: string[]) => void;
   placeholder?: string;
   disabled?: boolean;
+  maxItems?: number;
 };
 
 export function EditableListField({
@@ -22,10 +23,13 @@ export function EditableListField({
   onChange,
   placeholder = "Add an item…",
   disabled = false,
+  maxItems,
 }: EditableListFieldProps) {
   const [draft, setDraft] = useState("");
+  const atMax = maxItems !== undefined && items.length >= maxItems;
 
   function addItem() {
+    if (atMax) return;
     const value = draft.trim();
     if (!value || items.some((item) => item.toLowerCase() === value.toLowerCase())) {
       setDraft("");
@@ -75,6 +79,7 @@ export function EditableListField({
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             placeholder={placeholder}
+            disabled={atMax}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -82,7 +87,7 @@ export function EditableListField({
               }
             }}
           />
-          <Button type="button" variant="outline" onClick={addItem}>
+          <Button type="button" variant="outline" onClick={addItem} disabled={atMax}>
             Add
           </Button>
         </div>

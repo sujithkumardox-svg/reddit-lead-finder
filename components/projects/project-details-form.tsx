@@ -100,7 +100,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
       <Card>
         <CardHeader>
           <CardTitle>Keywords</CardTitle>
-          <CardDescription>{fields.keywords.length} total</CardDescription>
+          <CardDescription>{fields.keywords.length}/20 keywords</CardDescription>
         </CardHeader>
         <CardContent>
           <EditableListField
@@ -108,6 +108,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
             items={fields.keywords}
             onChange={(keywords) => setFields({ ...fields, keywords })}
             placeholder="Add a keyword…"
+            maxItems={20}
           />
         </CardContent>
       </Card>
@@ -115,7 +116,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
       <Card>
         <CardHeader>
           <CardTitle>Intent phrases</CardTitle>
-          <CardDescription>{fields.intentPhrases.length} total</CardDescription>
+          <CardDescription>{fields.intentPhrases.length}/15 intent phrases</CardDescription>
         </CardHeader>
         <CardContent>
           <EditableListField
@@ -123,6 +124,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
             items={fields.intentPhrases}
             onChange={(intentPhrases) => setFields({ ...fields, intentPhrases })}
             placeholder="Add an intent phrase…"
+            maxItems={15}
           />
         </CardContent>
       </Card>
@@ -130,7 +132,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
       <Card>
         <CardHeader>
           <CardTitle>Pain phrases</CardTitle>
-          <CardDescription>{fields.painPhrases.length} total</CardDescription>
+          <CardDescription>{fields.painPhrases.length}/15 pain phrases</CardDescription>
         </CardHeader>
         <CardContent>
           <EditableListField
@@ -138,6 +140,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
             items={fields.painPhrases}
             onChange={(painPhrases) => setFields({ ...fields, painPhrases })}
             placeholder="Add a pain phrase…"
+            maxItems={15}
           />
         </CardContent>
       </Card>
@@ -145,7 +148,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
       <Card>
         <CardHeader>
           <CardTitle>Competitors</CardTitle>
-          <CardDescription>{fields.competitors.length} total</CardDescription>
+          <CardDescription>{fields.competitors.length}/5 competitors</CardDescription>
         </CardHeader>
         <CardContent>
           <EditableListField
@@ -153,6 +156,7 @@ export function ProjectDetailsForm({ project }: { project: Project }) {
             items={fields.competitors}
             onChange={(competitors) => setFields({ ...fields, competitors })}
             placeholder="Add a competitor…"
+            maxItems={5}
           />
         </CardContent>
       </Card>
