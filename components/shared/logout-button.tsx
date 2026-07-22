@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { LogOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
@@ -32,10 +33,12 @@ export function LogoutButton() {
     <div className="flex flex-col items-end gap-1">
       <Button
         type="button"
-        variant="outline"
+        variant="ghost"
         onClick={handleLogout}
         disabled={loading}
+        className="text-neutral-400 hover:bg-white/5 hover:text-white"
       >
+        <LogOut data-icon="inline-start" />
         {loading ? "Signing out…" : "Log out"}
       </Button>
       {error && (

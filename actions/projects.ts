@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { analyzeWebsite } from "@/lib/ai/analyze-website";
+import { checkWebsiteReachable } from "@/lib/ai/check-website-reachable";
 import { deriveProjectNameFromUrl, normalizeWebsiteUrl } from "@/lib/ai/website-url";
 import { createClient } from "@/lib/supabase/server";
 import { createProject, updateProject } from "@/services/projects";
@@ -11,6 +12,54 @@ import type { ProjectDraft } from "@/types/project";
 export type ActionResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
+
+export type WebsiteValidation = {
+  websiteUrl: string;
+  faviconUrl: string;
+};
+
+/**
+ * Lightweight, independent website validation: normalizes the URL and
+ * confirms the site is reachable. Does NOT scrape page content, call
+ * Gemini, or run any part of AI onboarding - safe to call automatically and
+ * frequently (e.g. while the user is still typing). AI onboarding
+ * (`analyzeWebsiteAction`) is only ever started explicitly, separately from
+ * this check.
+ */
+export async function validateWebsiteAction(
+  rawUrl: string,
+): Promise<ActionResult<WebsiteValidation>> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { ok: false, error: "You must be signed in to create a project." };
+  }
+
+  let websiteUrl: string;
+  try {
+    websiteUrl = normalizeWebsiteUrl(rawUrl);
+  } catch {
+    return { ok: false, error: "Please enter a valid website URL." };
+  }
+
+  try {
+    await checkWebsiteReachable(websiteUrl);
+  } catch (error) {
+    console.error("Website reachability check failed:", error);
+    return { ok: false, error: "We couldn't reach that website." };
+  }
+
+  return {
+    ok: true,
+    data: {
+      websiteUrl,
+      faviconUrl: `https://www.google.com/s2/favicons?sz=64&domain=${new URL(websiteUrl).hostname}`,
+    },
+  };
+}
 
 /**
  * Step 1 of the Create Project wizard: takes only a website URL, fetches

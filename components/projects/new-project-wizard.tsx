@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Globe, Loader2 } from "lucide-react";
+import { Globe, Loader2, Sparkles } from "lucide-react";
 
 import { analyzeWebsiteAction, createProjectAction } from "@/actions/projects";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
@@ -110,28 +110,34 @@ export function NewProjectWizard() {
 
   if (step === "input") {
     return (
-      <Card className="mx-auto w-full max-w-lg">
-        <CardHeader>
-          <CardTitle>Create a project</CardTitle>
-          <CardDescription>
-            Enter your website URL. We&apos;ll analyze it and set up keyword
-            and lead-matching for you automatically.
-          </CardDescription>
-        </CardHeader>
-        <form onSubmit={handleAnalyze}>
-          <CardContent className="flex flex-col gap-4">
+      <div className="flex flex-1 flex-col items-center justify-center bg-neutral-950 px-4 py-14 sm:px-6">
+        <div className="w-full max-w-md">
+          <div className="text-center">
+            <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+              Let&apos;s find your first
+              <br />
+              Reddit customers.
+            </h1>
+            <p className="mx-auto mt-4 max-w-sm text-sm leading-relaxed text-neutral-400 sm:text-base">
+              Enter your website and our AI will understand your business,
+              generate keywords, identify competitors, and prepare your first
+              Reddit lead-finding project.
+            </p>
+          </div>
+
+          <form onSubmit={handleAnalyze} className="mt-8 flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="websiteUrl" className="text-sm font-medium text-foreground">
-                Website URL
+              <label htmlFor="websiteUrl" className="text-sm font-medium text-neutral-200">
+                Website
               </label>
               <div className="relative">
-                <Globe className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Globe className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-neutral-500" />
                 <Input
                   id="websiteUrl"
                   type="text"
                   inputMode="url"
-                  placeholder="acme.com"
-                  className="pl-8"
+                  placeholder="https://yourcompany.com"
+                  className="h-12 rounded-xl border-white/10 bg-white/[0.03] pl-10 text-base text-white placeholder:text-neutral-500 focus-visible:border-orange-600/60 focus-visible:ring-orange-600/20"
                   value={websiteUrl}
                   onChange={(event) => setWebsiteUrl(event.target.value)}
                   required
@@ -141,129 +147,137 @@ export function NewProjectWizard() {
             </div>
 
             {error && <AuthMessage variant="error">{error}</AuthMessage>}
-          </CardContent>
-          <CardFooter>
-            <Button type="submit" size="lg" className="w-full">
-              Analyze website
+
+            <Button
+              type="submit"
+              size="lg"
+              className="mt-2 h-12 w-full rounded-xl bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 active:bg-orange-700"
+            >
+              <Sparkles data-icon="inline-start" className="size-4" />
+              Analyze Website
             </Button>
-          </CardFooter>
-        </form>
-      </Card>
+          </form>
+        </div>
+      </div>
     );
   }
 
   if (step === "analyzing") {
     return (
-      <Card className="mx-auto w-full max-w-lg">
-        <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-          <Loader2 className="size-8 animate-spin text-primary" />
-          <div>
-            <p className="font-medium text-foreground">
-              Analyzing {websiteUrl}
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {ANALYSIS_MESSAGES[messageIndex]}
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex flex-1 flex-col px-6 py-10">
+        <Card className="mx-auto w-full max-w-lg">
+          <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
+            <Loader2 className="size-8 animate-spin text-primary" />
+            <div>
+              <p className="font-medium text-foreground">
+                Analyzing {websiteUrl}
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {ANALYSIS_MESSAGES[messageIndex]}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
   if (!draft) return null;
 
   return (
-    <Card className="mx-auto w-full max-w-2xl">
-      <CardHeader>
-        <CardTitle>Review your project</CardTitle>
-        <CardDescription>
-          {draft.name} · {draft.websiteUrl}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Business description</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <BusinessDescriptionField
-              value={draft.description}
-              onChange={(description) => setDraft({ ...draft, description })}
-            />
-          </CardContent>
-        </Card>
+    <div className="flex flex-1 flex-col px-6 py-10">
+      <Card className="mx-auto w-full max-w-2xl">
+        <CardHeader>
+          <CardTitle>Review your project</CardTitle>
+          <CardDescription>
+            {draft.name} · {draft.websiteUrl}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Business description</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <BusinessDescriptionField
+                value={draft.description}
+                onChange={(description) => setDraft({ ...draft, description })}
+              />
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Keywords</CardTitle>
-            <CardDescription>{draft.keywords.length}/20 keywords</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <EditableListField
-              label=""
-              items={draft.keywords}
-              onChange={(keywords) => setDraft({ ...draft, keywords })}
-              placeholder="Add a keyword…"
-              maxItems={20}
-            />
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Keywords</CardTitle>
+              <CardDescription>{draft.keywords.length}/20 keywords</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <EditableListField
+                label=""
+                items={draft.keywords}
+                onChange={(keywords) => setDraft({ ...draft, keywords })}
+                placeholder="Add a keyword…"
+                maxItems={20}
+              />
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Intent phrases</CardTitle>
-            <CardDescription>{draft.intentPhrases.length}/15 intent phrases</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <EditableListField
-              label=""
-              items={draft.intentPhrases}
-              onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
-              placeholder="Add an intent phrase…"
-              maxItems={15}
-            />
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Intent phrases</CardTitle>
+              <CardDescription>{draft.intentPhrases.length}/15 intent phrases</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <EditableListField
+                label=""
+                items={draft.intentPhrases}
+                onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
+                placeholder="Add an intent phrase…"
+                maxItems={15}
+              />
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Pain phrases</CardTitle>
-            <CardDescription>{draft.painPhrases.length}/15 pain phrases</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <EditableListField
-              label=""
-              items={draft.painPhrases}
-              onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
-              placeholder="Add a pain phrase…"
-              maxItems={15}
-            />
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Pain phrases</CardTitle>
+              <CardDescription>{draft.painPhrases.length}/15 pain phrases</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <EditableListField
+                label=""
+                items={draft.painPhrases}
+                onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
+                placeholder="Add a pain phrase…"
+                maxItems={15}
+              />
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Competitors</CardTitle>
-            <CardDescription>{draft.competitors.length}/5 competitors</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <EditableListField
-              label=""
-              items={draft.competitors}
-              onChange={(competitors) => setDraft({ ...draft, competitors })}
-              placeholder="Add a competitor…"
-              maxItems={5}
-            />
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Competitors</CardTitle>
+              <CardDescription>{draft.competitors.length}/5 competitors</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <EditableListField
+                label=""
+                items={draft.competitors}
+                onChange={(competitors) => setDraft({ ...draft, competitors })}
+                placeholder="Add a competitor…"
+                maxItems={5}
+              />
+            </CardContent>
+          </Card>
 
-        {error && <AuthMessage variant="error">{error}</AuthMessage>}
-      </CardContent>
-      <CardFooter className="flex justify-end gap-3">
-        <Button type="button" size="lg" disabled={creating} onClick={handleCreate}>
-          {creating ? "Saving…" : "Save Project"}
-        </Button>
-      </CardFooter>
-    </Card>
+          {error && <AuthMessage variant="error">{error}</AuthMessage>}
+        </CardContent>
+        <CardFooter className="flex justify-end gap-3">
+          <Button type="button" size="lg" disabled={creating} onClick={handleCreate}>
+            {creating ? "Saving…" : "Save Project"}
+          </Button>
+        </CardFooter>
+      </Card>
+    </div>
   );
 }
