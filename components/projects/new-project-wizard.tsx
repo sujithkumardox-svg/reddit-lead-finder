@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Globe, Loader2, Sparkles } from "lucide-react";
+import { CheckCircle, Globe, Loader2, LoaderCircle, Sparkles } from "lucide-react";
 
-import { analyzeWebsiteAction, createProjectAction } from "@/actions/projects";
+import { analyzeWebsiteAction, createProjectAction, validateWebsiteAction } from "@/actions/projects";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import type { ProjectDraft } from "@/types/project";
 
 type Step = "input" | "analyzing" | "review";
+type WebsiteValidationStatus = "idle" | "invalid" | "validating" | "valid";
 
 const ANALYSIS_MESSAGES = [
   "Reading your website…",
@@ -29,6 +30,13 @@ const ANALYSIS_MESSAGES = [
   "Finding competitors…",
   "Mapping buying intent…",
 ];
+
+const WEBSITE_VALIDATION_DEBOUNCE_MS = 700;
+
+/** Lightweight, local-only sanity check - no network request. */
+function looksLikeWebsite(value: string): boolean {
+  return /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i.test(value.trim());
+}
 
 export function NewProjectWizard() {
   const router = useRouter();
@@ -39,6 +47,10 @@ export function NewProjectWizard() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [messageIndex, setMessageIndex] = useState(0);
+  const [validationStatus, setValidationStatus] = useState<WebsiteValidationStatus>("idle");
+  const [faviconUrl, setFaviconUrl] = useState<string | null>(null);
+  const [faviconError, setFaviconError] = useState(false);
+  const validationRequestRef = useRef(0);
 
   const isDirty =
     draft !== null &&
@@ -70,6 +82,50 @@ export function NewProjectWizard() {
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [isDirty]);
+
+  // Lightweight, debounced website validation shown while the user is
+  // still on the input step. Reuses the existing, independent
+  // validateWebsiteAction() - never calls analyzeWebsiteAction() (AI
+  // onboarding only starts when the user explicitly clicks the button).
+  useEffect(() => {
+    if (step !== "input") return;
+
+    // Every input change immediately clears the previous validation
+    // result - no outdated favicon/message/button state is ever shown.
+    validationRequestRef.current += 1;
+    setValidationStatus("idle");
+    setFaviconUrl(null);
+    setFaviconError(false);
+
+    const trimmed = websiteUrl.trim();
+    if (!trimmed) return;
+
+    const timer = setTimeout(() => {
+      if (!looksLikeWebsite(trimmed)) {
+        setValidationStatus("invalid");
+        return;
+      }
+
+      const requestId = validationRequestRef.current;
+      setValidationStatus("validating");
+
+      validateWebsiteAction(trimmed).then((result) => {
+        // A newer input change/request has superseded this one - ignore.
+        if (validationRequestRef.current !== requestId) return;
+
+        if (!result.ok) {
+          setValidationStatus("invalid");
+          return;
+        }
+
+        setFaviconUrl(result.data.faviconUrl);
+        setValidationStatus("valid");
+      });
+    }, WEBSITE_VALIDATION_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [websiteUrl, step]);
 
   async function handleAnalyze(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -131,7 +187,17 @@ export function NewProjectWizard() {
                 Website
               </label>
               <div className="relative">
-                <Globe className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-neutral-500" />
+                {validationStatus === "valid" && faviconUrl && !faviconError ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={faviconUrl}
+                    alt=""
+                    className="absolute top-1/2 left-3.5 size-4 -translate-y-1/2 rounded-sm"
+                    onError={() => setFaviconError(true)}
+                  />
+                ) : (
+                  <Globe className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-neutral-500" />
+                )}
                 <Input
                   id="websiteUrl"
                   type="text"
@@ -144,6 +210,23 @@ export function NewProjectWizard() {
                   autoFocus
                 />
               </div>
+              {validationStatus === "invalid" && (
+                <p className="text-xs text-rose-400">
+                  Please enter a valid and reachable website
+                </p>
+              )}
+              {validationStatus === "validating" && (
+                <p className="flex items-center gap-1.5 text-xs text-orange-500">
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                  Validating...
+                </p>
+              )}
+              {validationStatus === "valid" && (
+                <p className="flex items-center gap-1.5 text-xs text-emerald-400">
+                  <CheckCircle className="size-3.5" />
+                  Website is valid and reachable
+                </p>
+              )}
             </div>
 
             {error && <AuthMessage variant="error">{error}</AuthMessage>}
@@ -151,6 +234,7 @@ export function NewProjectWizard() {
             <Button
               type="submit"
               size="lg"
+              disabled={validationStatus !== "valid"}
               className="mt-2 h-12 w-full rounded-xl bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 active:bg-orange-700"
             >
               <Sparkles data-icon="inline-start" className="size-4" />
