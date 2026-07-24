@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle, Globe, Loader2, LoaderCircle, Sparkles } from "lucide-react";
+import { CheckCircle, Globe, LoaderCircle, Sparkles } from "lucide-react";
 
 import { analyzeWebsiteAction, createProjectAction, validateWebsiteAction } from "@/actions/projects";
+import { AiOnboardingReview } from "@/components/projects/ai-onboarding-review";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
@@ -23,14 +24,6 @@ import type { ProjectDraft } from "@/types/project";
 type Step = "input" | "analyzing" | "review";
 type WebsiteValidationStatus = "idle" | "invalid" | "validating" | "valid";
 
-const ANALYSIS_MESSAGES = [
-  "Reading your website…",
-  "Identifying your audience…",
-  "Extracting keywords…",
-  "Finding competitors…",
-  "Mapping buying intent…",
-];
-
 const WEBSITE_VALIDATION_DEBOUNCE_MS = 700;
 
 /** Lightweight, local-only sanity check - no network request. */
@@ -45,8 +38,8 @@ export function NewProjectWizard() {
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
   const [originalDraft, setOriginalDraft] = useState<ProjectDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [messageIndex, setMessageIndex] = useState(0);
   const [validationStatus, setValidationStatus] = useState<WebsiteValidationStatus>("idle");
   const [faviconUrl, setFaviconUrl] = useState<string | null>(null);
   const [faviconError, setFaviconError] = useState(false);
@@ -60,16 +53,6 @@ export function NewProjectWizard() {
       JSON.stringify(draft.intentPhrases) !== JSON.stringify(originalDraft.intentPhrases) ||
       JSON.stringify(draft.painPhrases) !== JSON.stringify(originalDraft.painPhrases) ||
       JSON.stringify(draft.competitors) !== JSON.stringify(originalDraft.competitors));
-
-  useEffect(() => {
-    if (step !== "analyzing") return;
-
-    const interval = setInterval(() => {
-      setMessageIndex((index) => (index + 1) % ANALYSIS_MESSAGES.length);
-    }, 2500);
-
-    return () => clearInterval(interval);
-  }, [step]);
 
   useEffect(() => {
     if (!isDirty) return;
@@ -130,13 +113,27 @@ export function NewProjectWizard() {
   async function handleAnalyze(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setMessageIndex(0);
+    setIsAnalyzing(true);
+
+    // setIsAnalyzing(true) and setStep("analyzing") would otherwise land in
+    // the same React batch, so the button's loading state would never
+    // actually get painted before the screen swaps. A single
+    // requestAnimationFrame callback still runs BEFORE that frame's paint,
+    // so it's not enough on its own. Chaining two forces the browser to
+    // actually paint the loading button in between (rAF #1 lets the
+    // current frame paint; rAF #2 - scheduled from inside rAF #1 - only
+    // fires before the *next* frame). No timers, no artificial delay -
+    // just waiting for two real paint cycles.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
     setStep("analyzing");
 
     const result = await analyzeWebsiteAction(websiteUrl);
 
     if (!result.ok) {
       setError(result.error);
+      setIsAnalyzing(false);
       setStep("input");
       return;
     }
@@ -234,10 +231,14 @@ export function NewProjectWizard() {
             <Button
               type="submit"
               size="lg"
-              disabled={validationStatus !== "valid"}
+              disabled={isAnalyzing || validationStatus !== "valid"}
               className="mt-2 h-12 w-full rounded-xl bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 active:bg-orange-700"
             >
-              <Sparkles data-icon="inline-start" className="size-4" />
+              {isAnalyzing ? (
+                <LoaderCircle data-icon="inline-start" className="size-4 animate-spin" />
+              ) : (
+                <Sparkles data-icon="inline-start" className="size-4" />
+              )}
               Analyze Website
             </Button>
           </form>
@@ -247,23 +248,7 @@ export function NewProjectWizard() {
   }
 
   if (step === "analyzing") {
-    return (
-      <div className="flex flex-1 flex-col px-6 py-10">
-        <Card className="mx-auto w-full max-w-lg">
-          <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-            <Loader2 className="size-8 animate-spin text-primary" />
-            <div>
-              <p className="font-medium text-foreground">
-                Analyzing {websiteUrl}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {ANALYSIS_MESSAGES[messageIndex]}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
+    return <AiOnboardingReview />;
   }
 
   if (!draft) return null;
