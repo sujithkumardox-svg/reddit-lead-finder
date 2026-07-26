@@ -1,82 +1,74 @@
-import { Circle, LoaderCircle } from "lucide-react";
+"use client";
 
-type OnboardingStep = {
-  title: string;
-  description?: string;
-};
+import { useEffect, useState } from "react";
 
-// Phase 1 mock data only. No API calls, timers, or automatic progression -
-// the first step is always rendered as active and the rest as upcoming.
-const ONBOARDING_STEPS: OnboardingStep[] = [
-  {
-    title: "Understanding your business",
-    description: "Learning what your product does and who it's for.",
-  },
-  { title: "Finding your competitors" },
-  { title: "Learning your ideal customers" },
-  { title: "Building your lead discovery strategy" },
-  { title: "Finalizing your project" },
-];
+const DOT_FRAMES = [".", "..", "..."];
+const DOT_INTERVAL_MS = 500;
 
-const ACTIVE_STEP_INDEX = 0;
+// Full-ring spinner: a bright orange head fades into a soft trailing glow,
+// then into a dark, faded orange track (not gray) as it wraps back around -
+// same brand orange (#f97316 / orange-500) used everywhere else in the app.
+const SPINNER_RING_STYLE = {
+  background:
+    "conic-gradient(from 0deg, #f97316 0%, rgba(249,115,22,0.45) 22%, rgba(249,115,22,0.12) 50%, rgba(249,115,22,0.45) 78%, #f97316 100%)",
+  WebkitMaskImage:
+    "radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px))",
+  maskImage:
+    "radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px))",
+  filter: "drop-shadow(0 0 5px rgba(249,115,22,0.35))",
+} as const;
 
-// Fixed, hand-picked delays (rather than a computed index * ms) so the
-// stagger stays on Tailwind's standard delay scale.
-const STEP_ENTRANCE_DELAYS = ["delay-0", "delay-100", "delay-200", "delay-300", "delay-400"];
+// Soft, layered glow behind the animated dots - same brand orange as the
+// spinner, kept subtle so it reads as premium rather than flashy.
+const DOTS_GLOW_STYLE = {
+  textShadow: "0 0 6px rgba(249,115,22,0.6), 0 0 14px rgba(249,115,22,0.3)",
+} as const;
 
 /**
- * Static Phase 1 UI for the AI onboarding review page. Reassures the user
- * that the AI is preparing their project while the editable onboarding
- * review (a later phase) is not yet available.
+ * Simple loading screen shown while the backend runs AI onboarding. Purely
+ * presentational - no progress steps, no backend polling. Only the
+ * trailing dots on the status text animate, continuously and forever; the
+ * "Analyzing website" text itself never changes.
  */
 export function AiOnboardingReview() {
+  const [dotFrameIndex, setDotFrameIndex] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDotFrameIndex((index) => (index + 1) % DOT_FRAMES.length);
+    }, DOT_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <div className="flex flex-1 flex-col items-center justify-center bg-neutral-950 px-4 py-14 sm:px-6">
-      <div className="w-full max-w-md animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out">
-        <div className="text-center">
-          <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            Preparing your project
-          </h1>
-          <p className="mx-auto mt-4 max-w-sm text-sm leading-relaxed text-neutral-400 sm:text-base">
-            Our AI is learning about your business and preparing everything
-            needed to find high-quality Reddit leads.
-          </p>
-        </div>
+      <div className="w-full max-w-md animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out text-center">
+        <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+          Preparing your project
+        </h1>
+        <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-neutral-400 sm:text-base">
+          We&apos;re analyzing your website, understanding your business,
+          identifying relevant competitors, understanding your ideal
+          customers, and preparing everything needed to find high‑quality
+          Reddit leads.
+        </p>
 
-        <ol className="ml-16 mt-16 flex flex-col gap-7">
-          {ONBOARDING_STEPS.map((step, index) => {
-            const isActive = index === ACTIVE_STEP_INDEX;
+        <div
+          className="mx-auto mt-12 size-14 animate-spin rounded-full"
+          style={SPINNER_RING_STYLE}
+        />
 
-            return (
-              <li
-                key={step.title}
-                className={`flex flex-col gap-1 animate-in fade-in slide-in-from-bottom-3 fill-mode-both duration-400 ${STEP_ENTRANCE_DELAYS[index] ?? ""}`}
-              >
-                <div className="flex items-center gap-3">
-                  {isActive ? (
-                    <LoaderCircle className="size-5 shrink-0 animate-spin text-orange-500 transition-colors duration-300" />
-                  ) : (
-                    <Circle className="size-5 shrink-0 text-neutral-700 transition-colors duration-300" />
-                  )}
-                  <p
-                    className={
-                      isActive
-                        ? "text-base font-medium text-white transition-colors duration-300"
-                        : "text-base font-medium text-neutral-500 transition-colors duration-300"
-                    }
-                  >
-                    {step.title}
-                  </p>
-                </div>
-                {isActive && step.description && (
-                  <p className="pl-8 text-sm text-neutral-400">
-                    {step.description}
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ol>
+        <p className="mt-6 text-lg font-medium text-white">
+          Analyzing website
+          <span
+            className="ml-1 inline-block w-9 text-left tracking-[0.35em] text-orange-500"
+            style={DOTS_GLOW_STYLE}
+          >
+            {DOT_FRAMES[dotFrameIndex]}
+          </span>
+        </p>
+        <p className="mt-2 text-base text-neutral-400">This may take a few moments.</p>
       </div>
     </div>
   );

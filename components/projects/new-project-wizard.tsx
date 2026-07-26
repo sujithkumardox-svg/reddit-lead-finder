@@ -254,7 +254,7 @@ export function NewProjectWizard() {
   if (!draft) return null;
 
   return (
-    <div className="flex flex-1 flex-col px-6 py-10">
+    <div className="flex flex-1 flex-col px-6 py-10 animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out">
       <Card className="mx-auto w-full max-w-2xl">
         <CardHeader>
           <CardTitle>Review your project</CardTitle>
