@@ -32,7 +32,7 @@ export function BusinessDescriptionField({
         onChange={(event) => onChange(event.target.value)}
         maxLength={MAX_LENGTH}
         disabled={disabled}
-        className="field-sizing-fixed h-32 resize-none overflow-y-auto"
+        className="field-sizing-fixed h-32 resize-none overflow-y-auto py-3 caret-orange-500 focus-visible:border-orange-500 focus-visible:ring-0 [scrollbar-color:#525252_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-neutral-600 [&::-webkit-scrollbar-thumb:hover]:bg-neutral-500 [&::-webkit-scrollbar-track]:bg-transparent"
       />
       <p className="text-xs text-muted-foreground">
         {value.length}/{MAX_LENGTH} characters

@@ -9,7 +9,7 @@ export default function AppLayout({
 }>) {
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between border-b border-white/10 bg-neutral-950 px-4 py-3.5 sm:px-6 md:px-8">
+      <header className="sticky top-0 z-50 flex items-center justify-between border-b border-white/10 bg-neutral-950 px-4 py-3.5 sm:px-6 md:px-8">
         <div className="flex items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-lg bg-orange-600">
             <Activity className="size-4 text-white" strokeWidth={2.5} />

@@ -55,7 +55,7 @@ export function EditableListField({
           {items.map((item, index) => (
             <li
               key={`${item}-${index}`}
-              className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 py-0.5 pr-1 pl-2.5 text-xs text-foreground"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/50 py-0.5 pr-1 pl-2.5 text-xs text-foreground"
             >
               {item}
               {!disabled && (
@@ -87,7 +87,12 @@ export function EditableListField({
               }
             }}
           />
-          <Button type="button" variant="outline" onClick={addItem} disabled={atMax}>
+          <Button
+            type="button"
+            onClick={addItem}
+            disabled={atMax}
+            className="bg-orange-500 text-white hover:bg-orange-600 active:bg-orange-700 focus-visible:border-orange-600/60 focus-visible:ring-orange-600/20"
+          >
             Add
           </Button>
         </div>

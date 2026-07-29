@@ -254,95 +254,95 @@ export function NewProjectWizard() {
   if (!draft) return null;
 
   return (
-    <div className="flex flex-1 flex-col px-6 py-10 animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out">
-      <Card className="mx-auto w-full max-w-2xl">
+    <div className="dark flex flex-1 flex-col bg-neutral-950 px-4 pt-10 pb-14 text-white animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out sm:px-6">
+      <div className="mx-auto w-full max-w-2xl text-center">
+        <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+          Project Details
+        </h1>
+        <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-neutral-400 sm:text-base">
+          We&apos;ve analyzed your website. Please review and update the
+          project details before saving.
+        </p>
+      </div>
+
+      <Card className="[--card-spacing:1.5rem] mx-auto mt-10 w-full max-w-[45rem] rounded-2xl border border-orange-500/20 bg-neutral-900/60 text-white ring-0">
         <CardHeader>
-          <CardTitle>Review your project</CardTitle>
-          <CardDescription>
-            {draft.name} · {draft.websiteUrl}
-          </CardDescription>
+          <CardTitle className="text-center text-lg font-semibold text-white">
+            Review your project
+          </CardTitle>
+          <div className="mt-4 flex items-center gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`https://www.google.com/s2/favicons?sz=64&domain=${new URL(draft.websiteUrl).hostname}`}
+              alt=""
+              className="size-7 shrink-0 rounded-md"
+              onError={(event) => {
+                event.currentTarget.style.visibility = "hidden";
+              }}
+            />
+            <div className="flex flex-col">
+              <p className="text-sm font-medium text-white">{draft.name}</p>
+              <CardDescription className="text-neutral-400">
+                {draft.websiteUrl}
+              </CardDescription>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Business description</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <BusinessDescriptionField
-                value={draft.description}
-                onChange={(description) => setDraft({ ...draft, description })}
-              />
-            </CardContent>
-          </Card>
+          <div className="flex flex-col gap-2">
+            <h3 className="text-sm font-medium text-white">Business description</h3>
+            <BusinessDescriptionField
+              value={draft.description}
+              onChange={(description) => setDraft({ ...draft, description })}
+            />
+          </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Keywords</CardTitle>
-              <CardDescription>{draft.keywords.length}/20 keywords</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EditableListField
-                label=""
-                items={draft.keywords}
-                onChange={(keywords) => setDraft({ ...draft, keywords })}
-                placeholder="Add a keyword…"
-                maxItems={20}
-              />
-            </CardContent>
-          </Card>
+          <EditableListField
+            label="Keywords"
+            description={`${draft.keywords.length}/20 keywords`}
+            items={draft.keywords}
+            onChange={(keywords) => setDraft({ ...draft, keywords })}
+            placeholder="Add a keyword…"
+            maxItems={20}
+          />
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Intent phrases</CardTitle>
-              <CardDescription>{draft.intentPhrases.length}/15 intent phrases</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EditableListField
-                label=""
-                items={draft.intentPhrases}
-                onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
-                placeholder="Add an intent phrase…"
-                maxItems={15}
-              />
-            </CardContent>
-          </Card>
+          <EditableListField
+            label="Intent phrases"
+            description={`${draft.intentPhrases.length}/15 intent phrases`}
+            items={draft.intentPhrases}
+            onChange={(intentPhrases) => setDraft({ ...draft, intentPhrases })}
+            placeholder="Add an intent phrase…"
+            maxItems={15}
+          />
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Pain phrases</CardTitle>
-              <CardDescription>{draft.painPhrases.length}/15 pain phrases</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EditableListField
-                label=""
-                items={draft.painPhrases}
-                onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
-                placeholder="Add a pain phrase…"
-                maxItems={15}
-              />
-            </CardContent>
-          </Card>
+          <EditableListField
+            label="Pain phrases"
+            description={`${draft.painPhrases.length}/15 pain phrases`}
+            items={draft.painPhrases}
+            onChange={(painPhrases) => setDraft({ ...draft, painPhrases })}
+            placeholder="Add a pain phrase…"
+            maxItems={15}
+          />
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Competitors</CardTitle>
-              <CardDescription>{draft.competitors.length}/5 competitors</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EditableListField
-                label=""
-                items={draft.competitors}
-                onChange={(competitors) => setDraft({ ...draft, competitors })}
-                placeholder="Add a competitor…"
-                maxItems={5}
-              />
-            </CardContent>
-          </Card>
+          <EditableListField
+            label="Competitors"
+            description={`${draft.competitors.length}/5 competitors`}
+            items={draft.competitors}
+            onChange={(competitors) => setDraft({ ...draft, competitors })}
+            placeholder="Add a competitor…"
+            maxItems={5}
+          />
 
           {error && <AuthMessage variant="error">{error}</AuthMessage>}
         </CardContent>
-        <CardFooter className="flex justify-end gap-3">
-          <Button type="button" size="lg" disabled={creating} onClick={handleCreate}>
+        <CardFooter className="flex justify-end gap-3 border-white/10 bg-transparent">
+          <Button
+            type="button"
+            size="lg"
+            disabled={creating}
+            onClick={handleCreate}
+            className="rounded-xl bg-orange-500 text-white hover:bg-orange-600 active:bg-orange-700"
+          >
             {creating ? "Saving…" : "Save Project"}
           </Button>
         </CardFooter>
