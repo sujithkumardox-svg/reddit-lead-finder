@@ -265,7 +265,7 @@ export function NewProjectWizard() {
         </p>
       </div>
 
-      <Card className="[--card-spacing:1.5rem] mx-auto mt-10 w-full max-w-[45rem] rounded-2xl border border-orange-500/20 bg-neutral-900/60 text-white ring-0">
+      <Card className="[--card-spacing:1.5rem] mx-auto mt-10 w-full max-w-[45rem] rounded-2xl border border-orange-500/40 bg-neutral-900/60 text-white ring-0">
         <CardHeader>
           <CardTitle className="text-center text-lg font-semibold text-white">
             Review your project
@@ -288,7 +288,7 @@ export function NewProjectWizard() {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="flex flex-col gap-6">
+        <CardContent className="flex flex-col gap-8">
           <div className="flex flex-col gap-2">
             <h3 className="text-sm font-medium text-white">Business description</h3>
             <BusinessDescriptionField
@@ -335,15 +335,15 @@ export function NewProjectWizard() {
 
           {error && <AuthMessage variant="error">{error}</AuthMessage>}
         </CardContent>
-        <CardFooter className="flex justify-end gap-3 border-white/10 bg-transparent">
+        <CardFooter className="flex justify-center gap-3 border-white/10 bg-transparent">
           <Button
             type="button"
             size="lg"
             disabled={creating}
             onClick={handleCreate}
-            className="rounded-xl bg-orange-500 text-white hover:bg-orange-600 active:bg-orange-700"
+            className="h-12 w-full max-w-md rounded-xl bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 active:bg-orange-700"
           >
-            {creating ? "Saving…" : "Save Project"}
+            Save and Continue
           </Button>
         </CardFooter>
       </Card>

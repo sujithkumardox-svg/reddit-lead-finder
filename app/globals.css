@@ -129,6 +129,35 @@
   }
 }
 
+/* Browser page scrollbar - styled to match the Business Description
+   textarea scrollbar (thin, rounded neutral-600 thumb, dark track,
+   no arrow buttons). */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #525252 #0a0a0a;
+}
+
+html::-webkit-scrollbar {
+  width: 6px;
+}
+
+html::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+html::-webkit-scrollbar-thumb {
+  background-color: #525252;
+  border-radius: 9999px;
+}
+
+html::-webkit-scrollbar-thumb:hover {
+  background-color: #737373;
+}
+
+html::-webkit-scrollbar-button {
+  display: none;
+}
+
 #websiteUrl:-webkit-autofill,
 #websiteUrl:-webkit-autofill:hover,
 #websiteUrl:-webkit-autofill:focus,
