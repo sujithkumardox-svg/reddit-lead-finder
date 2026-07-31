@@ -270,7 +270,7 @@ export function NewProjectWizard() {
           <CardTitle className="text-center text-lg font-semibold text-white">
             Review your project
           </CardTitle>
-          <div className="mt-4 flex items-center gap-3">
+          <div className="mt-4 flex min-w-0 items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={`https://www.google.com/s2/favicons?sz=64&domain=${new URL(draft.websiteUrl).hostname}`}
@@ -280,9 +280,9 @@ export function NewProjectWizard() {
                 event.currentTarget.style.visibility = "hidden";
               }}
             />
-            <div className="flex flex-col">
-              <p className="text-sm font-medium text-white">{draft.name}</p>
-              <CardDescription className="text-neutral-400">
+            <div className="flex min-w-0 flex-col">
+              <p className="truncate text-sm font-medium text-white">{draft.name}</p>
+              <CardDescription className="truncate text-neutral-400">
                 {draft.websiteUrl}
               </CardDescription>
             </div>
