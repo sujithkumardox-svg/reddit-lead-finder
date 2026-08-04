@@ -172,3 +172,67 @@ export async function getProjectById(
     updatedAt: data.updated_at as string,
   };
 }
+
+/**
+ * Onboarding search data for the Reddit scanning engine, including the
+ * hidden fields (`hiddenKeywords`, `subreddits`) that `Project`/`getProjectById`
+ * never expose. This - and the database - are the only places these fields
+ * may live. Never pass the return value of this function to a client
+ * component or a server action response.
+ */
+export type ProjectScanData = {
+  id: string;
+  isActive: boolean;
+  keywords: string[];
+  hiddenKeywords: string[];
+  intentPhrases: string[];
+  painPhrases: string[];
+  competitors: string[];
+  subreddits: string[];
+};
+
+/**
+ * Loads everything the Reddit Scanner needs to search Reddit for a project:
+ * its visible keywords plus the hidden keyword variations and hidden
+ * subreddit list generated during AI onboarding.
+ */
+export async function getProjectScanData(
+  userId: string,
+  projectId: string,
+): Promise<ProjectScanData | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("projects")
+    .select(
+      "id, is_active, keywords, hidden_keywords, intent_phrases, pain_phrases, competitors, subreddits",
+    )
+    .eq("user_id", userId)
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getProjectScanData Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to load project search data.");
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  return {
+    id: data.id as string,
+    isActive: data.is_active as boolean,
+    keywords: (data.keywords as string[] | null) ?? [],
+    hiddenKeywords: (data.hidden_keywords as string[] | null) ?? [],
+    intentPhrases: (data.intent_phrases as string[] | null) ?? [],
+    painPhrases: (data.pain_phrases as string[] | null) ?? [],
+    competitors: (data.competitors as string[] | null) ?? [],
+    subreddits: (data.subreddits as string[] | null) ?? [],
+  };
+}

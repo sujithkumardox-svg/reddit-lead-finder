@@ -28,6 +28,9 @@ Copy `.env.local` and set the following:
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Yes | Supabase anon/publishable key. |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Yes | Server-only. Powers the AI website analysis used when creating a project (`/projects/new`). Never expose this with a `NEXT_PUBLIC_` prefix. |
 | `AI_MODEL` | No | Google Gemini model id used for website analysis. Defaults to `gemini-3.5-flash`. |
+| `REDDIT_CLIENT_ID` | Yes (for scanning) | Server-only. Reddit app client id, used by the Reddit Scanner to authenticate with Reddit's API. |
+| `REDDIT_CLIENT_SECRET` | Yes (for scanning) | Server-only. Reddit app client secret. Never expose this with a `NEXT_PUBLIC_` prefix. |
+| `REDDIT_USER_AGENT` | Yes (for scanning) | Server-only. User agent string sent with every Reddit API request (Reddit requires a descriptive, unique user agent), e.g. `RedditLeadFinder/1.0 (by u/your-username)`. |
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
