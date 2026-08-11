@@ -10,14 +10,26 @@ vi.mock("@/services/projects", () => ({
   getProjectScanData: vi.fn(),
 }));
 
+// `services/gemini-qualification-queue.ts` talks to Supabase (via
+// `server-only`), which doesn't exist in a plain unit test. Mocking it here
+// keeps these tests focused on the handler's wiring - whether it calls
+// `enqueueCandidate` for qualifying candidates and skips non-qualifying
+// ones - without exercising real Supabase access.
+vi.mock("@/services/gemini-qualification-queue", () => ({
+  enqueueCandidate: vi.fn(),
+}));
+
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
+import { enqueueCandidate } from "@/services/gemini-qualification-queue";
 import {
   RedditScanMatchingHandler,
   mapProjectScanDataToOnboardingTerms,
 } from "@/services/reddit-scan-matching-handler";
+import type { RedditCommentItem } from "@/types/reddit-scan";
 
 const mockedGetProjectScanData = vi.mocked(getProjectScanData);
+const mockedEnqueueCandidate = vi.mocked(enqueueCandidate);
 
 function makeScanData(overrides: Partial<ProjectScanData> = {}): ProjectScanData {
   return {
@@ -50,6 +62,21 @@ function makePost(overrides: Partial<RedditPostItem> = {}): RedditPostItem {
   };
 }
 
+function makeComment(overrides: Partial<RedditCommentItem> = {}): RedditCommentItem {
+  return {
+    id: "t1_comment1",
+    type: "comment",
+    subreddit: "SaaS",
+    postId: "t3_post1",
+    body: "Just a neutral comment with no matches at all.",
+    author: "another_user",
+    permalink: "https://reddit.com/r/SaaS/post1/comment1",
+    score: 3,
+    createdAt: "2026-08-01T00:05:00.000Z",
+    ...overrides,
+  };
+}
+
 function makeScanResult(overrides: Partial<RedditScanResult> = {}): RedditScanResult {
   return {
     projectId: "project-1",
@@ -63,6 +90,8 @@ function makeScanResult(overrides: Partial<RedditScanResult> = {}): RedditScanRe
 
 beforeEach(() => {
   mockedGetProjectScanData.mockReset();
+  mockedEnqueueCandidate.mockReset();
+  mockedEnqueueCandidate.mockResolvedValue(null);
 });
 
 describe("mapProjectScanDataToOnboardingTerms", () => {
@@ -111,5 +140,58 @@ describe("RedditScanMatchingHandler", () => {
     const handler = new RedditScanMatchingHandler("user-1");
 
     await expect(handler.handleScanResult(makeScanResult())).rejects.toThrow("Project not found.");
+  });
+
+  it("enqueues a Gemini-eligible post (intent/pain match) into the database queue immediately after matching", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost(); // title/body trigger an intent + pain + competitor match
+    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [] }));
+
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
+    expect(mockedEnqueueCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        userId: "user-1",
+        redditItemId: "t3_post1",
+        itemType: "post",
+        parentPostId: null,
+        title: "Looking for an alternative to Syften",
+        body: "We are struggling to find leads.",
+        qualificationReason: "intent_or_pain",
+      }),
+    );
+  });
+
+  it("enqueues a Gemini-eligible comment into the database queue with its parent post id", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const comment = makeComment({ body: "Struggling to find leads for my SaaS." });
+    await handler.handleScanResult(makeScanResult({ posts: [], comments: [comment] }));
+
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
+    expect(mockedEnqueueCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redditItemId: "t1_comment1",
+        itemType: "comment",
+        parentPostId: "t3_post1",
+        title: null,
+        body: "Struggling to find leads for my SaaS.",
+        qualificationReason: "intent_or_pain",
+      }),
+    );
+  });
+
+  it("does not enqueue a post/comment that does not qualify for Gemini", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost({ title: "Just chatting", body: "Nothing relevant here." });
+    const comment = makeComment({ body: "Nothing relevant here either." });
+    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [comment] }));
+
+    expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
   });
 });

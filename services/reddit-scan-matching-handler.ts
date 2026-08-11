@@ -1,10 +1,18 @@
 import "server-only";
 
+import { evaluateGeminiEligibility } from "@/lib/matching/gemini-eligibility";
+import type { GeminiEligibilityResult, QualificationReason } from "@/lib/matching/gemini-eligibility";
 import type { OnboardingSearchTerms } from "@/lib/matching/matching-engine";
 import { matchRedditScanResult } from "@/lib/matching/reddit-scan-matcher";
-import type { RedditScanMatchingResult } from "@/lib/matching/reddit-scan-matcher";
+import type {
+  MatchedRedditComment,
+  MatchedRedditPost,
+  RedditScanMatchingResult,
+} from "@/lib/matching/reddit-scan-matcher";
+import { enqueueCandidate } from "@/services/gemini-qualification-queue";
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
+import type { EnqueueGeminiCandidateInput, GeminiQueueQualificationReason } from "@/types/gemini-qualification-queue";
 import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-scan";
 
 /**
@@ -34,6 +42,15 @@ import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-s
  *   4. Every post (title + body combined) and every comment (body alone)
  *      is matched via `matchRedditScanResult`
  *      (`lib/matching/reddit-scan-matcher.ts`).
+ *   5. Every matched post/comment is run through Phase 8's
+ *      `evaluateGeminiEligibility` (`lib/matching/gemini-eligibility.ts`).
+ *      Candidates with `qualifiesForGemini: true` are immediately persisted
+ *      to the `gemini_qualification_queue` database table via
+ *      `enqueueCandidate` (`services/gemini-qualification-queue.ts`) -
+ *      BEFORE any future Gemini processing - so a crash after this point
+ *      can never lose a qualifying candidate. Non-qualifying candidates are
+ *      never enqueued. This handler never talks to Supabase directly for
+ *      the queue; all persistence goes through that dedicated service.
  *
  * `scanProjectReddit`'s return type (`Promise<RedditScanResult>`) is left
  * untouched - the collected Matching Engine results are exposed
@@ -45,9 +62,9 @@ import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-s
  * const matchingResult = handler.getMatchingResult();
  * ```
  *
- * Deliberately out of scope here (see task spec): Gemini qualification,
- * final keyword scoring, the AI qualification queue, persisting anything
- * to the database, the Leads UI, and scan scheduling.
+ * Deliberately out of scope here (see task spec): calling the Gemini API
+ * (or any fallback AI provider), a Gemini worker/retry loop, persisting
+ * anything to `reddit_leads` or the Leads UI, and scan scheduling.
  */
 export class RedditScanMatchingHandler implements RedditScanResultHandler {
   private readonly userId: string;
@@ -65,6 +82,8 @@ export class RedditScanMatchingHandler implements RedditScanResultHandler {
 
     const terms = mapProjectScanDataToOnboardingTerms(scanData);
     this.matchingResult = matchRedditScanResult(result, terms);
+
+    await enqueueGeminiEligibleCandidates(this.userId, result.projectId, this.matchingResult);
   }
 
   /**
@@ -91,5 +110,102 @@ export function mapProjectScanDataToOnboardingTerms(scanData: ProjectScanData): 
     painPhrases: scanData.painPhrases,
     competitors: scanData.competitors,
     hiddenKeywordVariations: scanData.hiddenKeywords,
+  };
+}
+
+/**
+ * Runs Phase 8 eligibility over every matched post/comment and persists
+ * the Gemini-eligible ones to the database queue. Each candidate is
+ * enqueued independently - one candidate failing to persist never stops
+ * the rest from being evaluated/queued, since a scan should surface as
+ * many crash-safe candidates as possible.
+ */
+async function enqueueGeminiEligibleCandidates(
+  userId: string,
+  projectId: string,
+  matchingResult: RedditScanMatchingResult,
+): Promise<void> {
+  for (const matchedPost of matchingResult.posts) {
+    const eligibility = evaluateGeminiEligibility(matchedPost.result);
+    if (!eligibility.qualifiesForGemini) {
+      continue;
+    }
+    await enqueueCandidate(buildPostCandidateInput(userId, projectId, matchedPost, eligibility));
+  }
+
+  for (const matchedComment of matchingResult.comments) {
+    const eligibility = evaluateGeminiEligibility(matchedComment.result);
+    if (!eligibility.qualifiesForGemini) {
+      continue;
+    }
+    await enqueueCandidate(buildCommentCandidateInput(userId, projectId, matchedComment, eligibility));
+  }
+}
+
+/** Only ever called for a candidate with `qualifiesForGemini: true`, so the reason can never be `"below_threshold"`. */
+function toQueueQualificationReason(reason: QualificationReason): GeminiQueueQualificationReason {
+  if (reason === "below_threshold") {
+    throw new Error("Cannot queue a candidate that did not qualify for Gemini.");
+  }
+  return reason;
+}
+
+function buildPostCandidateInput(
+  userId: string,
+  projectId: string,
+  matchedPost: MatchedRedditPost,
+  eligibility: GeminiEligibilityResult,
+): EnqueueGeminiCandidateInput {
+  const { post } = matchedPost;
+
+  return {
+    projectId,
+    userId,
+    redditItemId: post.id,
+    itemType: "post",
+    parentPostId: null,
+    subreddit: post.subreddit,
+    title: post.title,
+    body: post.body,
+    matchedText: matchedPost.text,
+    author: post.author,
+    permalink: post.permalink,
+    redditScore: post.score,
+    itemCreatedAt: post.createdAt,
+    matchedTerms: matchedPost.result,
+    numericalScore: eligibility.numericalScore,
+    diversityBonus: eligibility.diversityBonus,
+    finalScore: eligibility.finalScore,
+    qualificationReason: toQueueQualificationReason(eligibility.qualificationReason),
+  };
+}
+
+function buildCommentCandidateInput(
+  userId: string,
+  projectId: string,
+  matchedComment: MatchedRedditComment,
+  eligibility: GeminiEligibilityResult,
+): EnqueueGeminiCandidateInput {
+  const { comment } = matchedComment;
+
+  return {
+    projectId,
+    userId,
+    redditItemId: comment.id,
+    itemType: "comment",
+    parentPostId: comment.postId,
+    subreddit: comment.subreddit,
+    title: null,
+    body: comment.body,
+    matchedText: matchedComment.text,
+    author: comment.author,
+    permalink: comment.permalink,
+    redditScore: comment.score,
+    itemCreatedAt: comment.createdAt,
+    matchedTerms: matchedComment.result,
+    numericalScore: eligibility.numericalScore,
+    diversityBonus: eligibility.diversityBonus,
+    finalScore: eligibility.finalScore,
+    qualificationReason: toQueueQualificationReason(eligibility.qualificationReason),
   };
 }
