@@ -50,7 +50,10 @@ import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-s
  *      BEFORE any future Gemini processing - so a crash after this point
  *      can never lose a qualifying candidate. Non-qualifying candidates are
  *      never enqueued. This handler never talks to Supabase directly for
- *      the queue; all persistence goes through that dedicated service.
+ *      the queue; all persistence goes through that dedicated service. A
+ *      genuine DB insertion error for one candidate is caught and logged
+ *      (not retried) rather than aborting the rest of the scan's
+ *      candidates - see `safelyEnqueueCandidate` below.
  *
  * `scanProjectReddit`'s return type (`Promise<RedditScanResult>`) is left
  * untouched - the collected Matching Engine results are exposed
@@ -116,9 +119,9 @@ export function mapProjectScanDataToOnboardingTerms(scanData: ProjectScanData): 
 /**
  * Runs Phase 8 eligibility over every matched post/comment and persists
  * the Gemini-eligible ones to the database queue. Each candidate is
- * enqueued independently - one candidate failing to persist never stops
- * the rest from being evaluated/queued, since a scan should surface as
- * many crash-safe candidates as possible.
+ * enqueued independently via `safelyEnqueueCandidate` - one candidate
+ * failing to persist never stops the rest from being evaluated/queued,
+ * since a scan should surface as many crash-safe candidates as possible.
  */
 async function enqueueGeminiEligibleCandidates(
   userId: string,
@@ -130,7 +133,7 @@ async function enqueueGeminiEligibleCandidates(
     if (!eligibility.qualifiesForGemini) {
       continue;
     }
-    await enqueueCandidate(buildPostCandidateInput(userId, projectId, matchedPost, eligibility));
+    await safelyEnqueueCandidate(buildPostCandidateInput(userId, projectId, matchedPost, eligibility));
   }
 
   for (const matchedComment of matchingResult.comments) {
@@ -138,7 +141,28 @@ async function enqueueGeminiEligibleCandidates(
     if (!eligibility.qualifiesForGemini) {
       continue;
     }
-    await enqueueCandidate(buildCommentCandidateInput(userId, projectId, matchedComment, eligibility));
+    await safelyEnqueueCandidate(buildCommentCandidateInput(userId, projectId, matchedComment, eligibility));
+  }
+}
+
+/**
+ * Calls `enqueueCandidate` and swallows any error it throws, logging it
+ * instead. `enqueueCandidate` already treats a duplicate (Postgres `23505`)
+ * as an expected, non-throwing outcome on its own - that handling is
+ * untouched and lives entirely in `services/gemini-qualification-queue.ts`.
+ * This wrapper only guards against a *genuine* DB insertion error (e.g. a
+ * connectivity or permissions failure), so that one candidate's failure
+ * can never abort the rest of the scan's candidates. Never retried here -
+ * a single attempt per candidate per scan.
+ */
+async function safelyEnqueueCandidate(input: EnqueueGeminiCandidateInput): Promise<void> {
+  try {
+    await enqueueCandidate(input);
+  } catch (error) {
+    console.error(
+      `[reddit-scan-matching-handler] Failed to queue Gemini candidate ${input.redditItemId} for project ${input.projectId}:`,
+      error,
+    );
   }
 }
 

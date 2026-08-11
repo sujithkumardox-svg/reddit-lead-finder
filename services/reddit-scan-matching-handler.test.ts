@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RedditPostItem, RedditScanResult } from "@/types/reddit-scan";
 
@@ -193,5 +193,87 @@ describe("RedditScanMatchingHandler", () => {
     await handler.handleScanResult(makeScanResult({ posts: [post], comments: [comment] }));
 
     expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
+  });
+});
+
+describe("RedditScanMatchingHandler - Gemini queue insertion error handling", () => {
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("1. still safely ignores a duplicate candidate (enqueueCandidate resolving null) without throwing or logging an error", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    mockedEnqueueCandidate.mockResolvedValue(null); // mirrors the real 23505 duplicate outcome
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost();
+    await expect(
+      handler.handleScanResult(makeScanResult({ posts: [post], comments: [] })),
+    ).resolves.toBeUndefined();
+
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("2. logs a genuine DB insertion error for a candidate", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    const dbError = new Error("connection refused");
+    mockedEnqueueCandidate.mockRejectedValueOnce(dbError);
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost();
+    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [] }));
+
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("t3_post1"),
+      dbError,
+    );
+  });
+
+  it("3. still processes later candidates after an earlier one fails to enqueue", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    mockedEnqueueCandidate
+      .mockRejectedValueOnce(new Error("connection refused"))
+      .mockResolvedValueOnce(null);
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const failingPost = makePost({ id: "t3_fails" });
+    const survivingComment = makeComment({ id: "t1_survives", body: "Struggling to find leads for my SaaS." });
+    await handler.handleScanResult(
+      makeScanResult({ posts: [failingPost], comments: [survivingComment] }),
+    );
+
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(2);
+    expect(mockedEnqueueCandidate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ redditItemId: "t3_fails" }),
+    );
+    expect(mockedEnqueueCandidate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ redditItemId: "t1_survives" }),
+    );
+  });
+
+  it("4. does not fail the scan/handler because one queue insertion errored", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    mockedEnqueueCandidate.mockRejectedValueOnce(new Error("connection refused"));
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost();
+    const scanResult = makeScanResult({ posts: [post], comments: [] });
+
+    await expect(handler.handleScanResult(scanResult)).resolves.toBeUndefined();
+
+    // Matching results collected earlier in the same call are unaffected -
+    // the queue failure isn't retried and doesn't corrupt/discard them.
+    expect(handler.getMatchingResult()).not.toBeNull();
+    expect(handler.getMatchingResult()!.posts).toHaveLength(1);
   });
 });
