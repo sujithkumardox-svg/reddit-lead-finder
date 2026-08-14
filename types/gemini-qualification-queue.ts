@@ -55,6 +55,32 @@ export type GeminiQualificationQueueRow = {
   processingStartedAt: string | null;
   attemptCount: number;
   errorMessage: string | null;
+  /**
+   * Explicit AI qualification verdict (Phase 9): `true`/`false` once
+   * processed, `null` until a future AI worker processes this row.
+   * Distinct from `status` (worker call succeeded/failed) - a `"completed"`
+   * row can still resolve to `false` here.
+   */
+  aiQualified: boolean | null;
+  /**
+   * AI-produced qualification score (Phase 9). Customer-facing.
+   * Unrelated to `finalScore` (Phase 8's internal pre-AI gating score) -
+   * the two must never be conflated. `null` until a future AI worker
+   * processes this row.
+   */
+  aiScore: number | null;
+  /** AI's classification of this candidate. Taxonomy owned by the Phase 9 AI prompt/schema, not this type. */
+  aiMatchType: string | null;
+  /** AI-generated short summary of this candidate as a lead. */
+  aiLeadSummary: string | null;
+  /** AI's explanation of why (or why not) this candidate qualifies. */
+  aiMatchReason: string | null;
+  /** Competitor name the AI identified in this candidate's content, if any. */
+  aiPossibleCompetitor: string | null;
+  /** Provenance: AI provider that produced the `ai*` result fields above (e.g. `"google"`). Current provider is Gemini; may differ if a fallback provider is ever used. */
+  aiProvider: string | null;
+  /** Provenance: AI model identifier that produced the `ai*` result fields above (e.g. `"gemini-3.5-flash"`). */
+  aiModel: string | null;
   createdAt: string;
   updatedAt: string;
 };

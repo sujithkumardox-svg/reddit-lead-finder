@@ -20,7 +20,7 @@ import type {
  */
 
 const QUEUE_COLUMNS =
-  "id, project_id, user_id, reddit_item_id, item_type, parent_post_id, subreddit, title, body, matched_text, author, permalink, reddit_score, item_created_at, matched_terms, numerical_score, diversity_bonus, final_score, qualification_reason, status, processing_started_at, attempt_count, error_message, created_at, updated_at";
+  "id, project_id, user_id, reddit_item_id, item_type, parent_post_id, subreddit, title, body, matched_text, author, permalink, reddit_score, item_created_at, matched_terms, numerical_score, diversity_bonus, final_score, qualification_reason, status, processing_started_at, attempt_count, error_message, ai_qualified, ai_score, ai_match_type, ai_lead_summary, ai_match_reason, ai_possible_competitor, ai_provider, ai_model, created_at, updated_at";
 
 /** Visibility timeout `recoverStaleProcessing` uses when the caller doesn't pass one. */
 const DEFAULT_VISIBILITY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -49,6 +49,14 @@ type QueueRowRecord = {
   processing_started_at: unknown;
   attempt_count: unknown;
   error_message: unknown;
+  ai_qualified: unknown;
+  ai_score: unknown;
+  ai_match_type: unknown;
+  ai_lead_summary: unknown;
+  ai_match_reason: unknown;
+  ai_possible_competitor: unknown;
+  ai_provider: unknown;
+  ai_model: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -78,6 +86,14 @@ function mapRowToQueueRow(row: QueueRowRecord): GeminiQualificationQueueRow {
     processingStartedAt: row.processing_started_at as string | null,
     attemptCount: row.attempt_count as number,
     errorMessage: row.error_message as string | null,
+    aiQualified: row.ai_qualified as boolean | null,
+    aiScore: row.ai_score as number | null,
+    aiMatchType: row.ai_match_type as string | null,
+    aiLeadSummary: row.ai_lead_summary as string | null,
+    aiMatchReason: row.ai_match_reason as string | null,
+    aiPossibleCompetitor: row.ai_possible_competitor as string | null,
+    aiProvider: row.ai_provider as string | null,
+    aiModel: row.ai_model as string | null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
