@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import type { QualifyRedditCandidateResult } from "@/lib/ai/qualify-reddit-candidate";
 import type { MatchingEngineResult } from "@/lib/matching/matching-engine";
 import type {
   EnqueueGeminiCandidateInput,
@@ -250,6 +251,49 @@ export async function markCompleted(id: string): Promise<void> {
       hint: error.hint,
     });
     throw new Error("Failed to mark Gemini candidate as completed.");
+  }
+}
+
+/**
+ * Persists a Phase 9B Gemini qualification result (`aiQualified`, `aiScore`,
+ * `aiMatchType`, `aiLeadSummary`, `aiMatchReason`, `aiPossibleCompetitor`,
+ * plus the `aiProvider`/`aiModel` provenance the service attaches) for a
+ * claimed row, and marks it `completed` in the same update. Because both
+ * happen in one atomic write, there is never a window where the AI result
+ * is saved without the row also being marked successfully completed, or
+ * vice versa - satisfying "mark successful only after the result is
+ * saved" without needing two separate round trips.
+ */
+export async function saveQualificationResult(
+  id: string,
+  result: QualifyRedditCandidateResult,
+): Promise<void> {
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("gemini_qualification_queue")
+    .update({
+      ai_qualified: result.aiQualified,
+      ai_score: result.aiScore,
+      ai_match_type: result.aiMatchType,
+      ai_lead_summary: result.aiLeadSummary,
+      ai_match_reason: result.aiMatchReason,
+      ai_possible_competitor: result.aiPossibleCompetitor,
+      ai_provider: result.aiProvider,
+      ai_model: result.aiModel,
+      status: "completed",
+      error_message: null,
+    })
+    .eq("id", id);
+
+  if (error) {
+    console.error("saveQualificationResult Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to save Gemini qualification result.");
   }
 }
 
