@@ -42,8 +42,12 @@ export type GeminiQualificationQueueRow = {
   /** The exact text the Matching Engine matched against (post title+body combined, or the comment body alone). */
   matchedText: string;
   author: string;
+  /** Reddit author fullname (`t2_...`). `null` when Reddit does not report one (e.g. a deleted author). */
+  authorId: string | null;
   permalink: string;
   redditScore: number;
+  /** Reddit comment count. Posts only - always `null` for comments, which have no such metric. */
+  numComments: number | null;
   itemCreatedAt: string;
   /** Complete Phase 7 `MatchingEngineResult` for this candidate. */
   matchedTerms: MatchingEngineResult;
@@ -55,6 +59,15 @@ export type GeminiQualificationQueueRow = {
   processingStartedAt: string | null;
   attemptCount: number;
   errorMessage: string | null;
+  /**
+   * Set immediately after claiming a fresh candidate, BEFORE ever invoking
+   * Gemini for it. `null` until a worker's first attempt to process this
+   * row. Used by `recoverStaleProcessing` to tell "Gemini was never
+   * attempted" (safe to auto-retry) apart from "Gemini may already have
+   * been called" (never auto-retried) for a stale row with no recorded
+   * `ai_*` result.
+   */
+  geminiCallAttemptedAt: string | null;
   /**
    * Explicit AI qualification verdict (Phase 9): `true`/`false` once
    * processed, `null` until a future AI worker processes this row.
@@ -77,6 +90,13 @@ export type GeminiQualificationQueueRow = {
   aiMatchReason: string | null;
   /** Competitor name the AI identified in this candidate's content, if any. */
   aiPossibleCompetitor: string | null;
+  /**
+   * AI's explanation of specifically why `aiPossibleCompetitor` was
+   * flagged (Phase 10), independent of `aiMatchReason` (which explains the
+   * overall `aiMatchType`/`aiScore` classification). `null` whenever
+   * `aiPossibleCompetitor` is `null`.
+   */
+  aiPossibleCompetitorReason: string | null;
   /** Provenance: AI provider that produced the `ai*` result fields above (e.g. `"google"`). Current provider is Gemini; may differ if a fallback provider is ever used. */
   aiProvider: string | null;
   /** Provenance: AI model identifier that produced the `ai*` result fields above (e.g. `"gemini-3.5-flash"`). */
@@ -97,8 +117,10 @@ export type EnqueueGeminiCandidateInput = {
   body: string;
   matchedText: string;
   author: string;
+  authorId: string | null;
   permalink: string;
   redditScore: number;
+  numComments: number | null;
   itemCreatedAt: string;
   matchedTerms: MatchingEngineResult;
   numericalScore: number;

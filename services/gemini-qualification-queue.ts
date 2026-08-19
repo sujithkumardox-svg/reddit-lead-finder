@@ -21,7 +21,7 @@ import type {
  */
 
 const QUEUE_COLUMNS =
-  "id, project_id, user_id, reddit_item_id, item_type, parent_post_id, subreddit, title, body, matched_text, author, permalink, reddit_score, item_created_at, matched_terms, numerical_score, diversity_bonus, final_score, qualification_reason, status, processing_started_at, attempt_count, error_message, ai_qualified, ai_score, ai_match_type, ai_lead_summary, ai_match_reason, ai_possible_competitor, ai_provider, ai_model, created_at, updated_at";
+  "id, project_id, user_id, reddit_item_id, item_type, parent_post_id, subreddit, title, body, matched_text, author, author_id, permalink, reddit_score, num_comments, item_created_at, matched_terms, numerical_score, diversity_bonus, final_score, qualification_reason, status, processing_started_at, attempt_count, error_message, gemini_call_attempted_at, ai_qualified, ai_score, ai_match_type, ai_lead_summary, ai_match_reason, ai_possible_competitor, ai_possible_competitor_reason, ai_provider, ai_model, created_at, updated_at";
 
 /** Visibility timeout `recoverStaleProcessing` uses when the caller doesn't pass one. */
 const DEFAULT_VISIBILITY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -38,8 +38,10 @@ type QueueRowRecord = {
   body: unknown;
   matched_text: unknown;
   author: unknown;
+  author_id: unknown;
   permalink: unknown;
   reddit_score: unknown;
+  num_comments: unknown;
   item_created_at: unknown;
   matched_terms: unknown;
   numerical_score: unknown;
@@ -50,12 +52,14 @@ type QueueRowRecord = {
   processing_started_at: unknown;
   attempt_count: unknown;
   error_message: unknown;
+  gemini_call_attempted_at: unknown;
   ai_qualified: unknown;
   ai_score: unknown;
   ai_match_type: unknown;
   ai_lead_summary: unknown;
   ai_match_reason: unknown;
   ai_possible_competitor: unknown;
+  ai_possible_competitor_reason: unknown;
   ai_provider: unknown;
   ai_model: unknown;
   created_at: unknown;
@@ -75,8 +79,10 @@ function mapRowToQueueRow(row: QueueRowRecord): GeminiQualificationQueueRow {
     body: row.body as string,
     matchedText: row.matched_text as string,
     author: row.author as string,
+    authorId: row.author_id as string | null,
     permalink: row.permalink as string,
     redditScore: row.reddit_score as number,
+    numComments: row.num_comments as number | null,
     itemCreatedAt: row.item_created_at as string,
     matchedTerms: row.matched_terms as MatchingEngineResult,
     numericalScore: row.numerical_score as number,
@@ -87,12 +93,14 @@ function mapRowToQueueRow(row: QueueRowRecord): GeminiQualificationQueueRow {
     processingStartedAt: row.processing_started_at as string | null,
     attemptCount: row.attempt_count as number,
     errorMessage: row.error_message as string | null,
+    geminiCallAttemptedAt: row.gemini_call_attempted_at as string | null,
     aiQualified: row.ai_qualified as boolean | null,
     aiScore: row.ai_score as number | null,
     aiMatchType: row.ai_match_type as string | null,
     aiLeadSummary: row.ai_lead_summary as string | null,
     aiMatchReason: row.ai_match_reason as string | null,
     aiPossibleCompetitor: row.ai_possible_competitor as string | null,
+    aiPossibleCompetitorReason: row.ai_possible_competitor_reason as string | null,
     aiProvider: row.ai_provider as string | null,
     aiModel: row.ai_model as string | null,
     createdAt: row.created_at as string,
@@ -133,8 +141,10 @@ export async function enqueueCandidate(
       body: input.body,
       matched_text: input.matchedText,
       author: input.author,
+      author_id: input.authorId,
       permalink: input.permalink,
       reddit_score: input.redditScore,
+      num_comments: input.numComments,
       item_created_at: input.itemCreatedAt,
       matched_terms: input.matchedTerms,
       numerical_score: input.numericalScore,
@@ -231,6 +241,41 @@ export async function claimNextPending(): Promise<GeminiQualificationQueueRow | 
 }
 
 /**
+ * Crash-safety PRE-call checkpoint: durably records that a Gemini call is
+ * about to be attempted for this exact row - written BEFORE Gemini is ever
+ * invoked, one write earlier than `recordGeminiResult` below.
+ *
+ * The worker (`services/gemini-qualification-worker.ts`) calls this
+ * immediately after claiming a fresh candidate (one with no prior
+ * recorded result), before calling `qualifyRedditCandidate`/Gemini at all.
+ * If the process then crashes/OOMs/is killed at any point up to and
+ * including right after Gemini's HTTP response returns but before
+ * `recordGeminiResult` commits, this write has already survived, so
+ * `recoverStaleProcessing` can tell "Gemini was never attempted" (this
+ * column still `null`) apart from "Gemini may already have been called,
+ * outcome unknown" (this column set, but no `ai_*` result recorded) - see
+ * its doc comment for exactly how that distinction is used.
+ */
+export async function markGeminiCallAttempted(id: string): Promise<void> {
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("gemini_qualification_queue")
+    .update({ gemini_call_attempted_at: new Date().toISOString() })
+    .eq("id", id);
+
+  if (error) {
+    console.error("markGeminiCallAttempted Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to record that a Gemini call was attempted.");
+  }
+}
+
+/**
  * Marks a claimed row as `completed` once a future Gemini worker has
  * finished processing it successfully. Retained indefinitely (MVP
  * retention policy) as an audit trail - never deleted here.
@@ -255,10 +300,60 @@ export async function markCompleted(id: string): Promise<void> {
 }
 
 /**
+ * Crash-safety checkpoint: durably records a Gemini qualification result's
+ * `ai_*` columns WITHOUT touching `status` or `error_message` - unlike
+ * `saveQualificationResult` below, which also marks the row `completed`.
+ *
+ * The worker (`services/gemini-qualification-worker.ts`) calls this
+ * immediately after a Gemini API call succeeds, before doing anything
+ * else. That means even if the worker process crashes before
+ * `saveQualificationResult`/`markCompleted` ever runs - so the row is left
+ * stuck at `status = 'processing'` and is later reset to `pending` by
+ * `recoverStaleProcessing` - the fact that Gemini already answered for
+ * this exact row is still recoverable from the database: its `ai_score`
+ * (and every other `ai_*` column) is already non-null. The worker's
+ * `candidateAlreadyHasGeminiResult` check is what actually uses this to
+ * skip calling Gemini a second time; this function only provides the
+ * durable write that check relies on.
+ */
+export async function recordGeminiResult(
+  id: string,
+  result: QualifyRedditCandidateResult,
+): Promise<void> {
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("gemini_qualification_queue")
+    .update({
+      ai_qualified: result.aiQualified,
+      ai_score: result.aiScore,
+      ai_match_type: result.aiMatchType,
+      ai_lead_summary: result.aiLeadSummary,
+      ai_match_reason: result.aiMatchReason,
+      ai_possible_competitor: result.aiPossibleCompetitor,
+      ai_possible_competitor_reason: result.aiPossibleCompetitorReason,
+      ai_provider: result.aiProvider,
+      ai_model: result.aiModel,
+    })
+    .eq("id", id);
+
+  if (error) {
+    console.error("recordGeminiResult Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to record Gemini qualification result.");
+  }
+}
+
+/**
  * Persists a Phase 9B Gemini qualification result (`aiQualified`, `aiScore`,
  * `aiMatchType`, `aiLeadSummary`, `aiMatchReason`, `aiPossibleCompetitor`,
- * plus the `aiProvider`/`aiModel` provenance the service attaches) for a
- * claimed row, and marks it `completed` in the same update. Because both
+ * `aiPossibleCompetitorReason`, plus the `aiProvider`/`aiModel` provenance
+ * the service attaches) for a claimed row, and marks it `completed` in the
+ * same update. Because both
  * happen in one atomic write, there is never a window where the AI result
  * is saved without the row also being marked successfully completed, or
  * vice versa - satisfying "mark successful only after the result is
@@ -279,6 +374,7 @@ export async function saveQualificationResult(
       ai_lead_summary: result.aiLeadSummary,
       ai_match_reason: result.aiMatchReason,
       ai_possible_competitor: result.aiPossibleCompetitor,
+      ai_possible_competitor_reason: result.aiPossibleCompetitorReason,
       ai_provider: result.aiProvider,
       ai_model: result.aiModel,
       status: "completed",
@@ -321,22 +417,74 @@ export async function markFailed(id: string, errorMessage: string): Promise<void
   }
 }
 
+/** `recoverStaleProcessing`'s `error_message` for a row it refuses to auto-reset because Gemini may already have been called for it. */
+export const AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE =
+  "Gemini may have already been called for this candidate before the worker crashed (gemini_call_attempted_at is set, but no ai_* result was recorded). Manual verification is required before any retry - automatically resetting this row to pending could cause a duplicate Gemini API call.";
+
 /**
- * Visibility-timeout style crash recovery: resets any row still stuck in
+ * Visibility-timeout style crash recovery for rows still stuck in
  * `processing` whose `processing_started_at` is older than
- * `visibilityTimeoutMs` back to `pending` (clearing
- * `processing_started_at`), so a worker or server that crashed mid-claim
- * can never make a candidate disappear. `attempt_count` is left untouched
- * here - it was already incremented by the claim that got interrupted.
+ * `visibilityTimeoutMs`. Split into two sequential steps so a row whose
+ * Gemini call may already have succeeded is never silently retried:
  *
- * Returns the number of rows recovered. Callers decide how/when to invoke
- * this (e.g. at the start of a worker run) - no scheduler is defined here.
+ * 1. Flag as `failed` (never reset to `pending`) any stale row where
+ *    `gemini_call_attempted_at` is set but no `ai_*` result was ever
+ *    recorded - Gemini may already have answered right before the crash,
+ *    and there is no durable way to know either way. `error_message` is
+ *    set to `AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE` so this is unambiguous on
+ *    inspection. `failed` is the existing, already-safe terminal status -
+ *    `claimNextPending` only ever selects `pending` rows and this function
+ *    only ever touches `processing` rows, so a `failed` row can never be
+ *    automatically reclaimed or retried; a human must act on it. This
+ *    applies identically to posts and comments - nothing here depends on
+ *    `item_type`.
+ * 2. Reset every row still stale-`processing` at this point back to
+ *    `pending` (clearing `processing_started_at`) for a normal retry. By
+ *    construction (step 1 already ran first), every row reaching this
+ *    step is safe: either `gemini_call_attempted_at` was never set
+ *    (Gemini was provably never invoked for it), or it was set AND a full
+ *    `ai_*` result was already durably recorded by `recordGeminiResult`
+ *    (in which case the worker's `candidateAlreadyHasGeminiResult` check
+ *    reuses that result instead of calling Gemini again on reclaim).
+ *    `attempt_count` is left untouched here - it was already incremented
+ *    by the claim that got interrupted.
+ *
+ * Returns the number of rows reset to `pending` in step 2 only - rows
+ * flagged in step 1 are not "recovered" in that sense; they are
+ * deliberately left inert pending manual review. Callers decide how/when
+ * to invoke this (e.g. at the start of a worker run) - no scheduler is
+ * defined here.
  */
 export async function recoverStaleProcessing(
   visibilityTimeoutMs: number = DEFAULT_VISIBILITY_TIMEOUT_MS,
 ): Promise<number> {
   const supabase = await createClient();
   const cutoff = new Date(Date.now() - visibilityTimeoutMs).toISOString();
+
+  const { data: flagged, error: flagError } = await supabase
+    .from("gemini_qualification_queue")
+    .update({ status: "failed", error_message: AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE })
+    .eq("status", "processing")
+    .lt("processing_started_at", cutoff)
+    .not("gemini_call_attempted_at", "is", null)
+    .is("ai_score", null)
+    .select("id");
+
+  if (flagError) {
+    console.error("recoverStaleProcessing Supabase error (flagging ambiguous Gemini attempts):", {
+      message: flagError.message,
+      code: flagError.code,
+      details: flagError.details,
+      hint: flagError.hint,
+    });
+    throw new Error("Failed to flag ambiguous Gemini candidates for manual review.");
+  }
+
+  if ((flagged ?? []).length > 0) {
+    console.warn(
+      `[gemini-qualification-queue] Flagged ${flagged!.length} stale candidate(s) for manual review - Gemini may have already been called for them before a crash. Not auto-retried.`,
+    );
+  }
 
   const { data, error } = await supabase
     .from("gemini_qualification_queue")

@@ -14,6 +14,8 @@ export type RedditPostItem = {
   title: string;
   body: string;
   author: string;
+  /** Reddit author fullname, e.g. `t2_xyz789`. `null` when Reddit does not report one (e.g. a deleted author). */
+  authorId: string | null;
   url: string;
   permalink: string;
   score: number;
@@ -31,6 +33,8 @@ export type RedditCommentItem = {
   postId: string;
   body: string;
   author: string;
+  /** Reddit author fullname, e.g. `t2_xyz789`. `null` when Reddit does not report one (e.g. a deleted author). */
+  authorId: string | null;
   permalink: string;
   score: number;
   createdAt: string;

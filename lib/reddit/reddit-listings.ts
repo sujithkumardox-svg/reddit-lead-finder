@@ -16,6 +16,8 @@ export type RawRedditPost = {
   title: string;
   selftext: string;
   author: string;
+  /** Reddit author fullname (`t2_...`). Absent/null for a deleted author. */
+  author_fullname?: string | null;
   url: string;
   permalink: string;
   score: number;
@@ -31,6 +33,8 @@ export type RawRedditComment = {
   subreddit: string;
   body: string;
   author: string;
+  /** Reddit author fullname (`t2_...`). Absent/null for a deleted author. */
+  author_fullname?: string | null;
   permalink: string;
   score: number;
   created_utc: number;

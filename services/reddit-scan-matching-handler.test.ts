@@ -53,6 +53,7 @@ function makePost(overrides: Partial<RedditPostItem> = {}): RedditPostItem {
     title: "Looking for an alternative to Syften",
     body: "We are struggling to find leads.",
     author: "some_user",
+    authorId: "t2_someuser",
     url: "https://reddit.com/r/SaaS/post1",
     permalink: "https://reddit.com/r/SaaS/post1",
     score: 10,
@@ -70,6 +71,7 @@ function makeComment(overrides: Partial<RedditCommentItem> = {}): RedditCommentI
     postId: "t3_post1",
     body: "Just a neutral comment with no matches at all.",
     author: "another_user",
+    authorId: "t2_anotheruser",
     permalink: "https://reddit.com/r/SaaS/post1/comment1",
     score: 3,
     createdAt: "2026-08-01T00:05:00.000Z",
@@ -160,6 +162,8 @@ describe("RedditScanMatchingHandler", () => {
         title: "Looking for an alternative to Syften",
         body: "We are struggling to find leads.",
         qualificationReason: "intent_or_pain",
+        authorId: "t2_someuser",
+        numComments: 0,
       }),
     );
   });
@@ -180,6 +184,8 @@ describe("RedditScanMatchingHandler", () => {
         title: null,
         body: "Struggling to find leads for my SaaS.",
         qualificationReason: "intent_or_pain",
+        authorId: "t2_anotheruser",
+        numComments: null,
       }),
     );
   });

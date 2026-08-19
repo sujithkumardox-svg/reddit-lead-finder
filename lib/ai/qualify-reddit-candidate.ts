@@ -64,6 +64,14 @@ const qualifyRedditCandidateSchema = z
       .describe(
         "A real, identifiable competitor/company/product name only if the Reddit content provides credible evidence. Null when no real competitor is identified. Never invent, guess, or infer a name, and never return a name solely because it appears in the project's competitor list.",
       ),
+    aiPossibleCompetitorReason: z
+      .string()
+      .trim()
+      .min(1)
+      .nullable()
+      .describe(
+        "Concise explanation of specifically why aiPossibleCompetitor was flagged, grounded in the actual Reddit content. Must be null whenever aiPossibleCompetitor is null, and non-null whenever it is not null.",
+      ),
   })
   .strict();
 
@@ -181,20 +189,24 @@ Rules:
 - If there is no credible evidence of competitive activity at all, return null.
 - Never invent, hallucinate, or guess a company/product name. Never return a name from the project's competitor list merely because it's on that list - only return it if it is actually identified in this specific content. The project's competitor list is background context for recognizing real competitors, not permission to assume one is present.
 
+aiPossibleCompetitorReason (string or null)
+
+A concise explanation of specifically why aiPossibleCompetitor was flagged, grounded in the actual Reddit content - distinct from aiMatchReason, which explains the overall aiMatchType/aiScore classification instead. Must be null whenever aiPossibleCompetitor is null, and must be non-null (and specific to the competitor evidence) whenever aiPossibleCompetitor is not null.
+
 HANDLING SPECIFIC SITUATIONS
 
-- Deleted, removed, or empty content (e.g. exactly "[deleted]", "[removed]", or blank/whitespace): you cannot judge substance you cannot see. Classify as "not_relevant", aiScore in the 0-5 band, aiQualified false, aiPossibleCompetitor null, and state plainly in aiMatchReason that the content is unavailable.
+- Deleted, removed, or empty content (e.g. exactly "[deleted]", "[removed]", or blank/whitespace): you cannot judge substance you cannot see. Classify as "not_relevant", aiScore in the 0-5 band, aiQualified false, aiPossibleCompetitor null, aiPossibleCompetitorReason null, and state plainly in aiMatchReason that the content is unavailable.
 - Very short content (a few words, a single emoji, "this.", "same", etc.): do not overclaim intent, pain, or competitor signals from content too short to support them. Default toward "general_discussion" or "not_relevant" with a low aiScore unless the short text is unambiguous.
 - Empty project context lists: normal, not an error. Rely more on project.description and whichever lists are non-empty.
 - Vague/general discussion: prefer "general_discussion" over stretching into "pain_point" or "intent".
 - Multiple simultaneous signals: resolve using the fixed priority order above.
-- No identifiable competitor: return null for aiPossibleCompetitor rather than guessing; this is expected and common.
+- No identifiable competitor: return null for both aiPossibleCompetitor and aiPossibleCompetitorReason rather than guessing; this is expected and common.
 
 Do not guess when the content does not provide enough evidence for a judgment - prefer the more conservative classification, lower score, or null value.
 
 OUTPUT
 
-Respond only with the six structured fields you are asked to produce: aiQualified, aiScore, aiMatchType, aiLeadSummary, aiMatchReason, aiPossibleCompetitor. Do not add extra commentary, markdown, or fields.`;
+Respond only with the seven structured fields you are asked to produce: aiQualified, aiScore, aiMatchType, aiLeadSummary, aiMatchReason, aiPossibleCompetitor, aiPossibleCompetitorReason. Do not add extra commentary, markdown, or fields.`;
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.join(", ") : "(none provided)";
@@ -246,7 +258,8 @@ const SELF_JUDGED_MATCH_TYPES: ReadonlySet<QualifyRedditCandidateOutput["aiMatch
  * - aiMatchType "intent"/"pain_point"/"competitor_mention" with aiScore 6-10 -> Gemini's own aiQualified, unchanged
  *
  * Only ever narrows aiQualified toward false; never touches aiScore,
- * aiMatchType, aiLeadSummary, aiMatchReason, or aiPossibleCompetitor.
+ * aiMatchType, aiLeadSummary, aiMatchReason, aiPossibleCompetitor, or
+ * aiPossibleCompetitorReason.
  */
 export function normalizeAiQualified({
   aiMatchType,

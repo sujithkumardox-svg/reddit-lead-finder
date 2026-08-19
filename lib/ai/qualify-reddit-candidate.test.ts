@@ -95,6 +95,48 @@ describe("normalizeAiQualified", () => {
   });
 });
 
+describe("qualifyRedditCandidate - result shape", () => {
+  it("1. passes through aiPossibleCompetitorReason from Gemini's structured output alongside provenance", async () => {
+    const object = {
+      aiQualified: true,
+      aiScore: 8,
+      aiMatchType: "competitor_mention" as const,
+      aiLeadSummary: "Currently using a competitor and open to switching.",
+      aiMatchReason: "Explicitly compares this project to a named competitor.",
+      aiPossibleCompetitor: "Syften",
+      aiPossibleCompetitorReason: "The author says they currently pay for Syften and dislike its pricing.",
+    };
+    mockedGenerateObject.mockResolvedValueOnce({ object } as never);
+
+    const result = await qualifyRedditCandidate(makeInput());
+
+    expect(result.aiPossibleCompetitor).toBe("Syften");
+    expect(result.aiPossibleCompetitorReason).toBe(
+      "The author says they currently pay for Syften and dislike its pricing.",
+    );
+    expect(result.aiProvider).toBe("google");
+    expect(result.aiModel).toBe("gemini-3.5-flash");
+  });
+
+  it("2. leaves aiPossibleCompetitorReason null when there is no possible competitor", async () => {
+    const object = {
+      aiQualified: true,
+      aiScore: 8,
+      aiMatchType: "intent" as const,
+      aiLeadSummary: "Actively looking for a lead-gen tool.",
+      aiMatchReason: "Explicitly asks for recommendations.",
+      aiPossibleCompetitor: null,
+      aiPossibleCompetitorReason: null,
+    };
+    mockedGenerateObject.mockResolvedValueOnce({ object } as never);
+
+    const result = await qualifyRedditCandidate(makeInput());
+
+    expect(result.aiPossibleCompetitor).toBeNull();
+    expect(result.aiPossibleCompetitorReason).toBeNull();
+  });
+});
+
 describe("qualifyRedditCandidate - error propagation", () => {
   it("propagates a Gemini/API failure to the caller instead of swallowing it", async () => {
     const apiError = new Error("Gemini API request failed");
