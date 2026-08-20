@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 
+import { AppHeader } from "@/components/app-shell/app-header";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -21,11 +22,13 @@ export default async function ProjectsPage() {
   const projects = user ? await listProjects(user.id) : [];
 
   return (
-    <main className="flex flex-1 flex-col gap-6 px-6 py-8">
+    <>
+      <AppHeader />
+      <main className="flex flex-1 flex-col gap-6 px-6 py-8 text-white">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground">
+          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
+          <p className="text-neutral-400">
             Projects you&apos;re monitoring for Reddit leads.
           </p>
         </div>
@@ -53,7 +56,7 @@ export default async function ProjectsPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {projects.map((project) => (
-            <Link key={project.id} href={`/projects/${project.id}`}>
+            <Link key={project.id} href={`/projects/${project.id}/dashboard`}>
               <Card className="h-full transition-colors hover:bg-muted/40">
                 <CardHeader>
                   <CardTitle>{project.name}</CardTitle>
@@ -72,5 +75,6 @@ export default async function ProjectsPage() {
         </div>
       )}
     </main>
+    </>
   );
 }

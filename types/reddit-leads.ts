@@ -70,6 +70,32 @@ export type RedditLeadRow = {
  * already reviewed/contacted back to `'new'`, so `persistQualifiedLead`
  * never writes that column.
  */
+/** Sort options for the Phase 11 Leads workspace. Exactly four, by design. */
+export type LeadSort = "newest" | "oldest" | "highest_score" | "lowest_score";
+
+/** Score-band filters. Strong = 8-10, Partial = 6-7. Independent of card labels. */
+export type LeadMatchFilter = "strong" | "partial";
+
+/** Options for `listLeadsByProject`. All filters are optional; default is newest first. */
+export type ListLeadsOptions = {
+  sort?: LeadSort;
+  matchFilters?: LeadMatchFilter[];
+  /** Inclusive start of an `item_created_at` range (ISO timestamptz). */
+  dateFrom?: string;
+  /** Inclusive end of an `item_created_at` range (ISO timestamptz). */
+  dateTo?: string;
+  limit?: number;
+};
+
+/** Simple Dashboard counts. No extra analytics. */
+export type LeadStats = {
+  total: number;
+  newCount: number;
+  contactedCount: number;
+  strongCount: number;
+  partialCount: number;
+};
+
 export type PersistQualifiedLeadInput = {
   projectId: string;
   userId: string;

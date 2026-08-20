@@ -26,14 +26,14 @@ export default async function ProjectPage({
   }
 
   return (
-    <main className="flex flex-1 flex-col gap-6 px-6 pt-8 pb-24 animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out">
+    <main className="flex flex-1 flex-col gap-6 overflow-x-hidden px-4 pt-8 pb-24 text-white sm:px-6 animate-in fade-in slide-in-from-bottom-2 duration-500 ease-out">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1>
         <a
           href={project.websiteUrl}
           target="_blank"
           rel="noreferrer"
-          className="text-sm text-muted-foreground underline-offset-4 hover:text-primary hover:underline"
+          className="block max-w-full break-all text-sm text-muted-foreground underline-offset-4 hover:text-primary hover:underline"
         >
           {project.websiteUrl}
         </a>

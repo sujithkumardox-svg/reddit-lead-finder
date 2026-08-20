@@ -6,8 +6,9 @@ import { LogOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { cn } from "@/lib/utils";
 
-export function LogoutButton() {
+export function LogoutButton({ iconOnly = false }: { iconOnly?: boolean }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,20 +30,30 @@ export function LogoutButton() {
     router.refresh();
   }
 
+  const label = loading ? "Signing out" : "Log out";
+
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className={cn("flex flex-col gap-1", iconOnly ? "items-center" : "items-end")}>
       <Button
         type="button"
         variant="ghost"
+        size={iconOnly ? "icon" : "default"}
         onClick={handleLogout}
         disabled={loading}
+        aria-label={iconOnly ? label : undefined}
+        title={iconOnly ? label : undefined}
         className="text-neutral-400 hover:bg-white/5 hover:text-white"
       >
         <LogOut data-icon="inline-start" />
-        {loading ? "Signing out…" : "Log out"}
+        {!iconOnly && (loading ? "Signing out…" : "Log out")}
       </Button>
       {error && (
-        <p className="text-xs text-destructive" role="alert">{error}</p>
+        <p
+          className={cn("text-xs text-destructive", iconOnly && "sr-only")}
+          role="alert"
+        >
+          {error}
+        </p>
       )}
     </div>
   );
