@@ -5,11 +5,16 @@ import { useRouter } from "next/navigation";
 import { CheckCircle, Globe, LoaderCircle, Sparkles } from "lucide-react";
 
 import { analyzeWebsiteAction, createProjectAction, validateWebsiteAction } from "@/actions/projects";
+import { getProjectScanStatusAction, startProjectScanAction } from "@/actions/scans";
 import { AiOnboardingReview } from "@/components/projects/ai-onboarding-review";
+import { FindingLeadsDialog } from "@/components/projects/finding-leads-dialog";
+import { ProjectSavedDialog } from "@/components/projects/project-saved-dialog";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
+import { SCAN_POLL_INTERVAL_MS } from "@/lib/scans/scan-progress";
 import { Button } from "@/components/ui/button";
+import type { ScanProgressStage } from "@/types/sync-logs";
 import {
   Card,
   CardContent,
@@ -40,6 +45,12 @@ export function NewProjectWizard() {
   const [error, setError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [savedProjectId, setSavedProjectId] = useState<string | null>(null);
+  const [showSavedDialog, setShowSavedDialog] = useState(false);
+  const [startingScan, setStartingScan] = useState(false);
+  const [showFindingDialog, setShowFindingDialog] = useState(false);
+  const [scanStage, setScanStage] = useState<ScanProgressStage>("scanning");
+  const [scanError, setScanError] = useState<string | null>(null);
   const [validationStatus, setValidationStatus] = useState<WebsiteValidationStatus>("idle");
   const [faviconUrl, setFaviconUrl] = useState<string | null>(null);
   const [faviconError, setFaviconError] = useState(false);
@@ -110,6 +121,48 @@ export function NewProjectWizard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [websiteUrl, step]);
 
+  useEffect(() => {
+    if (
+      !showFindingDialog ||
+      !savedProjectId ||
+      scanStage === "failed" ||
+      scanStage === "completed"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function pollStatus() {
+      const result = await getProjectScanStatusAction(savedProjectId!);
+      if (cancelled) return;
+
+      if (!result.ok) {
+        setScanStage("failed");
+        setScanError(result.error);
+        return;
+      }
+
+      setScanStage(result.data.stage);
+      setScanError(result.data.errorMessage);
+
+      if (result.data.stage === "completed" && result.data.dashboardPath) {
+        router.push(result.data.dashboardPath);
+        router.refresh();
+      }
+    }
+
+    void pollStatus();
+    const interval = window.setInterval(() => {
+      void pollStatus();
+    }, SCAN_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [showFindingDialog, savedProjectId, scanStage, router]);
+
   async function handleAnalyze(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -157,8 +210,40 @@ export function NewProjectWizard() {
     }
 
     setOriginalDraft(draft);
-    router.push(`/projects/${result.data.id}`);
-    router.refresh();
+    setSavedProjectId(result.data.id);
+    setCreating(false);
+    setShowSavedDialog(true);
+  }
+
+  async function handleFindCustomers() {
+    if (!savedProjectId) return;
+
+    setError(null);
+    setStartingScan(true);
+    setScanError(null);
+    setScanStage("scanning");
+
+    const result = await startProjectScanAction(savedProjectId);
+
+    if (!result.ok) {
+      setStartingScan(false);
+      setShowSavedDialog(false);
+      setShowFindingDialog(true);
+      setScanStage("failed");
+      setScanError(result.error);
+      return;
+    }
+
+    setStartingScan(false);
+    setShowSavedDialog(false);
+    setShowFindingDialog(true);
+  }
+
+  function handleDismissFailedScan() {
+    setShowFindingDialog(false);
+    setShowSavedDialog(true);
+    setScanError(null);
+    setScanStage("scanning");
   }
 
   if (step === "input") {
@@ -339,7 +424,7 @@ export function NewProjectWizard() {
           <Button
             type="button"
             size="lg"
-            disabled={creating}
+            disabled={creating || Boolean(savedProjectId)}
             onClick={handleCreate}
             className="h-12 w-full max-w-md rounded-xl bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 active:bg-orange-700"
           >
@@ -347,6 +432,20 @@ export function NewProjectWizard() {
           </Button>
         </CardFooter>
       </Card>
+
+      <ProjectSavedDialog
+        open={showSavedDialog}
+        starting={startingScan}
+        onFindCustomers={() => {
+          void handleFindCustomers();
+        }}
+      />
+      <FindingLeadsDialog
+        open={showFindingDialog}
+        stage={scanStage}
+        errorMessage={scanError}
+        onDismissFailed={handleDismissFailedScan}
+      />
     </div>
   );
 }

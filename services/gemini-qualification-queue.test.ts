@@ -18,6 +18,7 @@ import { createClient } from "@/lib/supabase/server";
 import {
   AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE,
   claimNextPending,
+  countProjectQueueRowsSince,
   enqueueCandidate,
   markCompleted,
   markFailed,
@@ -47,6 +48,7 @@ function createChain(result: { data: unknown; error: unknown }) {
     lt: vi.fn(() => chain),
     not: vi.fn(() => chain),
     is: vi.fn(() => chain),
+    gte: vi.fn(() => chain),
     order: vi.fn(() => chain),
     limit: vi.fn(() => chain),
     single: vi.fn(() => Promise.resolve(result)),
@@ -344,6 +346,41 @@ describe("claimNextPending", () => {
     await expect(claimNextPending()).resolves.toBeNull();
   });
 
+  it("when projectId is provided, only selects pending rows for that project", async () => {
+    const selectChain = createChain({ data: { id: "queue-row-a", attempt_count: 0 }, error: null });
+    const updateChain = createChain({
+      data: makeDbRow({ project_id: "project-a", status: "processing", attempt_count: 1 }),
+      error: null,
+    });
+    const from = vi.fn().mockReturnValueOnce(selectChain).mockReturnValueOnce(updateChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    const row = await claimNextPending("project-a");
+
+    expect(selectChain.eq).toHaveBeenCalledWith("status", "pending");
+    expect(selectChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(selectChain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+    expect(row).not.toBeNull();
+    expect(row!.projectId).toBe("project-a");
+  });
+
+  it("when projectId is omitted, does not filter the claim by project", async () => {
+    const selectChain = createChain({ data: { id: "queue-row-1", attempt_count: 0 }, error: null });
+    const updateChain = createChain({
+      data: makeDbRow({ status: "processing", attempt_count: 1 }),
+      error: null,
+    });
+    const from = vi.fn().mockReturnValueOnce(selectChain).mockReturnValueOnce(updateChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    await claimNextPending();
+
+    const projectFilters = (selectChain.eq as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([column]) => column === "project_id",
+    );
+    expect(projectFilters).toHaveLength(0);
+  });
+
   it("returns null (does not throw) when another worker wins the claim race", async () => {
     const selectChain = createChain({ data: { id: "queue-row-1", attempt_count: 0 }, error: null });
     const updateChain = createChain({ data: null, error: null });
@@ -446,6 +483,21 @@ describe("recoverStaleProcessing", () => {
     mockedCreateClient.mockResolvedValue({ from } as never);
 
     await expect(recoverStaleProcessing()).resolves.toBe(5);
+  });
+
+  it("when projectId is provided, both recovery steps filter to that project only", async () => {
+    const flagChain = createChain({ data: [], error: null });
+    const resetChain = createChain({ data: [{ id: "queue-row-a" }], error: null });
+    const from = vi.fn().mockReturnValueOnce(flagChain).mockReturnValueOnce(resetChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    const recovered = await recoverStaleProcessing(15 * 60 * 1000, "project-a");
+
+    expect(flagChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(flagChain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+    expect(resetChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(resetChain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+    expect(recovered).toBe(1);
   });
 
   it("throws if flagging ambiguous Gemini attempts fails", async () => {
@@ -628,5 +680,22 @@ describe("recordGeminiResult", () => {
     await expect(recordGeminiResult("queue-row-1", makeQualifyResult())).rejects.toThrow(
       "Failed to record Gemini qualification result.",
     );
+  });
+});
+
+describe("countProjectQueueRowsSince", () => {
+  it("counts this project's queue rows created at or after the given timestamp", async () => {
+    const chain = createChain({ data: null, error: null });
+    (chain as { then: unknown }).then = (
+      onFulfilled: (value: { data: unknown; error: unknown; count: number }) => unknown,
+      onRejected?: (reason: unknown) => unknown,
+    ) => Promise.resolve({ data: null, error: null, count: 3 }).then(onFulfilled, onRejected);
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const count = await countProjectQueueRowsSince("project-1", "2026-08-22T10:00:00.000Z");
+
+    expect(chain.eq).toHaveBeenCalledWith("project_id", "project-1");
+    expect(chain.gte).toHaveBeenCalledWith("created_at", "2026-08-22T10:00:00.000Z");
+    expect(count).toBe(3);
   });
 });

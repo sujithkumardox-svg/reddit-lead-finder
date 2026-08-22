@@ -233,6 +233,38 @@ export async function listLeadsByProject(
 }
 
 /**
+ * How many `reddit_leads` this owned project has created at or after
+ * `sinceIso`. Used by the first-scan orchestrator to write
+ * `sync_logs.leads_found` for this run.
+ */
+export async function countLeadsCreatedSince(
+  userId: string,
+  projectId: string,
+  sinceIso: string,
+): Promise<number> {
+  const supabase = await createClient();
+
+  const { count, error } = await supabase
+    .from("reddit_leads")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("project_id", projectId)
+    .gte("created_at", sinceIso);
+
+  if (error) {
+    console.error("countLeadsCreatedSince Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to count leads.");
+  }
+
+  return count ?? 0;
+}
+
+/**
  * Simple Dashboard counts for one project. Computed in-process from a
  * narrow `status`/`ai_score` select so we do not add extra schema or RPCs.
  */

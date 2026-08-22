@@ -182,16 +182,29 @@ export async function enqueueCandidate(
  * update (the second `.eq("status", "pending")` below means that race
  * simply yields no update, not a crash or a double-claim).
  *
+ * When `projectId` is provided, only that project's pending rows are
+ * considered - a first-scan worker must pass it so it never drains
+ * another project's queue. Omitting it preserves the existing global
+ * claim behavior for a future cross-project worker.
+ *
  * Not implemented as a scheduler/loop - a future worker is expected to
  * call this repeatedly on its own schedule.
  */
-export async function claimNextPending(): Promise<GeminiQualificationQueueRow | null> {
+export async function claimNextPending(
+  projectId?: string,
+): Promise<GeminiQualificationQueueRow | null> {
   const supabase = await createClient();
 
-  const { data: nextPending, error: selectError } = await supabase
+  let selectQuery = supabase
     .from("gemini_qualification_queue")
     .select("id, attempt_count")
-    .eq("status", "pending")
+    .eq("status", "pending");
+
+  if (projectId) {
+    selectQuery = selectQuery.eq("project_id", projectId);
+  }
+
+  const { data: nextPending, error: selectError } = await selectQuery
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -454,21 +467,30 @@ export const AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE =
  * deliberately left inert pending manual review. Callers decide how/when
  * to invoke this (e.g. at the start of a worker run) - no scheduler is
  * defined here.
+ *
+ * When `projectId` is provided, both steps only touch that project's
+ * rows. Omitting it preserves the existing global recovery behavior.
  */
 export async function recoverStaleProcessing(
   visibilityTimeoutMs: number = DEFAULT_VISIBILITY_TIMEOUT_MS,
+  projectId?: string,
 ): Promise<number> {
   const supabase = await createClient();
   const cutoff = new Date(Date.now() - visibilityTimeoutMs).toISOString();
 
-  const { data: flagged, error: flagError } = await supabase
+  let flagQuery = supabase
     .from("gemini_qualification_queue")
     .update({ status: "failed", error_message: AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE })
     .eq("status", "processing")
     .lt("processing_started_at", cutoff)
     .not("gemini_call_attempted_at", "is", null)
-    .is("ai_score", null)
-    .select("id");
+    .is("ai_score", null);
+
+  if (projectId) {
+    flagQuery = flagQuery.eq("project_id", projectId);
+  }
+
+  const { data: flagged, error: flagError } = await flagQuery.select("id");
 
   if (flagError) {
     console.error("recoverStaleProcessing Supabase error (flagging ambiguous Gemini attempts):", {
@@ -486,12 +508,17 @@ export async function recoverStaleProcessing(
     );
   }
 
-  const { data, error } = await supabase
+  let resetQuery = supabase
     .from("gemini_qualification_queue")
     .update({ status: "pending", processing_started_at: null })
     .eq("status", "processing")
-    .lt("processing_started_at", cutoff)
-    .select("id");
+    .lt("processing_started_at", cutoff);
+
+  if (projectId) {
+    resetQuery = resetQuery.eq("project_id", projectId);
+  }
+
+  const { data, error } = await resetQuery.select("id");
 
   if (error) {
     console.error("recoverStaleProcessing Supabase error:", {
@@ -504,4 +531,34 @@ export async function recoverStaleProcessing(
   }
 
   return (data ?? []).length;
+}
+
+/**
+ * How many Gemini queue rows this project has created at or after
+ * `sinceIso`. Used to infer first-scan "scanning" vs "Scoring leads"
+ * without adding a new status column.
+ */
+export async function countProjectQueueRowsSince(
+  projectId: string,
+  sinceIso: string,
+): Promise<number> {
+  const supabase = await createClient();
+
+  const { count, error } = await supabase
+    .from("gemini_qualification_queue")
+    .select("id", { count: "exact", head: true })
+    .eq("project_id", projectId)
+    .gte("created_at", sinceIso);
+
+  if (error) {
+    console.error("countProjectQueueRowsSince Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    throw new Error("Failed to count Gemini queue rows.");
+  }
+
+  return count ?? 0;
 }

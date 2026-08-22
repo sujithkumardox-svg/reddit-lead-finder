@@ -35,15 +35,13 @@ import type { PersistQualifiedLeadInput, SubredditSafetyResult } from "@/types/r
  * go through the existing `services/gemini-qualification-queue.ts`
  * primitives.
  *
- * Phase 10 addition: once `saveQualificationResult` has successfully
- * written a `result.aiQualified === true` verdict, this module also looks
- * up the candidate's subreddit safety (rule-based, via
+ * Phase 10 addition: once Gemini has answered `aiQualified === true`, this
+ * module looks up the candidate's subreddit safety (rule-based, via
  * `lib/safety/subreddit-safety.ts`) and persists the qualified lead via
- * `services/reddit-leads.ts`. That step is deliberately best-effort and
- * isolated in its own try/catch (see `persistQualifiedLeadSafely` below) -
- * a failure there must never flip an already-`completed` queue row back to
- * `failed`, since the Gemini qualification itself already succeeded and
- * was already durably saved.
+ * `services/reddit-leads.ts` BEFORE the queue row is marked `completed`.
+ * Persistence is no longer best-effort after completion: if persist
+ * throws, the row stays recoverable (not `completed`) so a later claim
+ * can retry the upsert safely.
  *
  * Crash-recovery fix, in two layers:
  *
@@ -190,32 +188,19 @@ function buildPersistLeadInput(
 
 /**
  * Phase 10: looks up the candidate's subreddit safety (cached per-run via
- * `safetyCache`) and persists it as a qualified lead. Only ever called
- * after `saveQualificationResult` has already succeeded for a
- * `result.aiQualified === true` candidate.
- *
- * Deliberately swallows and only logs any error (Reddit rules fetch,
- * classification, or the lead upsert itself) rather than letting it
- * propagate - a failure here must never mark an already-`completed` queue
- * row `failed`, since the Gemini qualification it's based on already
- * succeeded and was already durably saved by `saveQualificationResult`. A
- * candidate that fails this step simply isn't yet reflected in
- * `reddit_leads`; retrying/backfilling that is out of scope here.
+ * `safetyCache`) and persists it as a qualified lead. Called after
+ * `recordGeminiResult` and BEFORE `saveQualificationResult` marks the
+ * queue row `completed`. Errors propagate so the caller does not mark the
+ * row completed; `persistQualifiedLead` is an upsert, so a later retry is
+ * safe.
  */
-async function persistQualifiedLeadSafely(
+async function persistQualifiedLeadOrThrow(
   candidate: GeminiQualificationQueueRow,
   result: QualifyRedditCandidateResult,
   safetyCache: Map<string, SubredditSafetyResult>,
 ): Promise<void> {
-  try {
-    const safety = await getSubredditSafety(candidate.subreddit, safetyCache);
-    await persistQualifiedLead(buildPersistLeadInput(candidate, result, safety));
-  } catch (error) {
-    console.error(
-      `[gemini-qualification-worker] Failed to persist qualified lead for candidate ${candidate.id}:`,
-      error,
-    );
-  }
+  const safety = await getSubredditSafety(candidate.subreddit, safetyCache);
+  await persistQualifiedLead(buildPersistLeadInput(candidate, result, safety));
 }
 
 /**
@@ -242,17 +227,16 @@ async function persistQualifiedLeadSafely(
  * reused to finish the row instead. Otherwise, `markGeminiCallAttempted`
  * is called FIRST (before even loading the project), then a fresh Gemini
  * call is made and immediately checkpointed via `recordGeminiResult` (see
- * its doc comment) before `saveQualificationResult` runs. Together with
- * `recoverStaleProcessing`'s handling of `gemini_call_attempted_at` (see
- * its doc comment in `services/gemini-qualification-queue.ts`), this means
- * the same `project_id`/`reddit_item_id` can never be automatically sent
- * to Gemini a second time after a Gemini call may already have been
+ * its doc comment) before persist / `saveQualificationResult` run. Together
+ * with `recoverStaleProcessing`'s handling of `gemini_call_attempted_at`
+ * (see its doc comment in `services/gemini-qualification-queue.ts`), this
+ * means the same `project_id`/`reddit_item_id` can never be automatically
+ * sent to Gemini a second time after a Gemini call may already have been
  * attempted, even across a worker crash and recovery cycle.
  *
- * Once qualification succeeds, a `result.aiQualified === true` verdict
- * additionally triggers `persistQualifiedLeadSafely` (Phase 10) - see its
- * doc comment for why that step can never turn a `"processed"` outcome
- * into a `"failed"` one.
+ * Required persist order for a qualified lead:
+ * record Gemini result → persist/upsert `reddit_leads` → only then mark
+ * the queue row `completed`. A persist failure must not complete the row.
  *
  * Returns `{ outcome: "no_pending_candidates" }` when the queue is empty,
  * so a caller can stop looping without treating that as an error.
@@ -262,11 +246,15 @@ async function persistQualifiedLeadSafely(
  * `Map` into every call within one worker run to get that behavior (see
  * `runGeminiQualificationWorker`). Omitting it (e.g. a one-off call) simply
  * means no cross-call caching, not incorrect behavior.
+ *
+ * `projectId`, when provided, is forwarded to `claimNextPending` so this
+ * call only claims that project's pending rows.
  */
 export async function processNextGeminiQualificationCandidate(
   safetyCache: Map<string, SubredditSafetyResult> = new Map(),
+  projectId?: string,
 ): Promise<ProcessCandidateOutcome> {
-  const claimed = await claimNextPending();
+  const claimed = await claimNextPending(projectId);
   if (!claimed) {
     return { outcome: "no_pending_candidates" };
   }
@@ -279,7 +267,6 @@ export async function processNextGeminiQualificationCandidate(
       // worker crashed. Reuse that already-paid-for result - never call
       // Gemini again for it.
       result = buildResultFromRecordedCandidate(claimed);
-      await saveQualificationResult(claimed.id, result);
     } else {
       // PRE-call checkpoint: durably record that a Gemini call is about to
       // be attempted for this exact row BEFORE doing anything that could
@@ -297,11 +284,16 @@ export async function processNextGeminiQualificationCandidate(
 
       result = await qualifyRedditCandidate(buildQualificationInput(claimed, project));
       // POST-call checkpoint: durably record the result BEFORE anything
-      // else, so a crash before saveQualificationResult/markCompleted can
+      // else, so a crash before persist / saveQualificationResult can
       // never cause this candidate to be sent to Gemini a second time.
       await recordGeminiResult(claimed.id, result);
-      await saveQualificationResult(claimed.id, result);
     }
+
+    if (result.aiQualified) {
+      await persistQualifiedLeadOrThrow(claimed, result, safetyCache);
+    }
+
+    await saveQualificationResult(claimed.id, result);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown error during Gemini qualification.";
@@ -313,10 +305,6 @@ export async function processNextGeminiQualificationCandidate(
     return { outcome: "failed", queueId: claimed.id, error: message };
   }
 
-  if (result.aiQualified) {
-    await persistQualifiedLeadSafely(claimed, result, safetyCache);
-  }
-
   return { outcome: "processed", queueId: claimed.id, aiQualified: result.aiQualified };
 }
 
@@ -325,6 +313,20 @@ export type GeminiQualificationWorkerSummary = {
   qualified: number;
   failed: number;
 };
+
+export type GeminiQualificationWorkerOptions = {
+  projectId?: string;
+  maxCandidates?: number;
+};
+
+function resolveWorkerOptions(
+  options?: number | GeminiQualificationWorkerOptions,
+): GeminiQualificationWorkerOptions {
+  if (typeof options === "number") {
+    return { maxCandidates: options };
+  }
+  return options ?? {};
+}
 
 /**
  * Drains the queue by repeatedly calling
@@ -335,25 +337,32 @@ export type GeminiQualificationWorkerSummary = {
  * `recoverStaleProcessing` (whose own doc comment anticipates being called
  * "at the start of a worker run").
  *
+ * Accepts either the existing positional `maxCandidates` number or an
+ * options object `{ projectId?, maxCandidates? }`. When `projectId` is
+ * set, recovery and claiming stay scoped to that project so a first-scan
+ * never drains another project's pending rows. Omitting it preserves the
+ * existing global worker behavior.
+ *
  * Creates a single subreddit-safety cache (Phase 10) for the whole run and
  * passes it into every `processNextGeminiQualificationCandidate` call, so
  * a subreddit seen more than once in the same run only triggers one Reddit
  * rules fetch.
  *
  * This function is not itself a scheduler - something else (a cron job,
- * route handler, etc., all out of scope for Phase 9C) is expected to
- * invoke it on a schedule.
+ * route handler, etc.) is expected to invoke it on a schedule.
  */
 export async function runGeminiQualificationWorker(
-  maxCandidates?: number,
+  options?: number | GeminiQualificationWorkerOptions,
 ): Promise<GeminiQualificationWorkerSummary> {
-  await recoverStaleProcessing();
+  const { projectId, maxCandidates } = resolveWorkerOptions(options);
+
+  await recoverStaleProcessing(undefined, projectId);
 
   const safetyCache = new Map<string, SubredditSafetyResult>();
   const summary: GeminiQualificationWorkerSummary = { processed: 0, qualified: 0, failed: 0 };
 
   while (maxCandidates === undefined || summary.processed + summary.failed < maxCandidates) {
-    const outcome = await processNextGeminiQualificationCandidate(safetyCache);
+    const outcome = await processNextGeminiQualificationCandidate(safetyCache, projectId);
 
     if (outcome.outcome === "no_pending_candidates") {
       break;
