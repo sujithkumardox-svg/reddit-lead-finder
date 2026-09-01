@@ -168,24 +168,29 @@ describe("RedditScanMatchingHandler", () => {
     );
   });
 
-  it("enqueues a Gemini-eligible comment into the database queue with its parent post id", async () => {
+  it("does not enqueue comment candidates even when comments are present in the scan result", async () => {
     mockedGetProjectScanData.mockResolvedValue(makeScanData());
 
     const handler = new RedditScanMatchingHandler("user-1");
     const comment = makeComment({ body: "Struggling to find leads for my SaaS." });
     await handler.handleScanResult(makeScanResult({ posts: [], comments: [comment] }));
 
+    expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
+  });
+
+  it("still enqueues a Gemini-eligible post when comments are also present", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+
+    const handler = new RedditScanMatchingHandler("user-1");
+    const post = makePost();
+    const comment = makeComment({ body: "Struggling to find leads for my SaaS." });
+    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [comment] }));
+
     expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
     expect(mockedEnqueueCandidate).toHaveBeenCalledWith(
       expect.objectContaining({
-        redditItemId: "t1_comment1",
-        itemType: "comment",
-        parentPostId: "t3_post1",
-        title: null,
-        body: "Struggling to find leads for my SaaS.",
-        qualificationReason: "intent_or_pain",
-        authorId: "t2_anotheruser",
-        numComments: null,
+        redditItemId: "t3_post1",
+        itemType: "post",
       }),
     );
   });
@@ -251,9 +256,9 @@ describe("RedditScanMatchingHandler - Gemini queue insertion error handling", ()
 
     const handler = new RedditScanMatchingHandler("user-1");
     const failingPost = makePost({ id: "t3_fails" });
-    const survivingComment = makeComment({ id: "t1_survives", body: "Struggling to find leads for my SaaS." });
+    const survivingPost = makePost({ id: "t3_survives" });
     await handler.handleScanResult(
-      makeScanResult({ posts: [failingPost], comments: [survivingComment] }),
+      makeScanResult({ posts: [failingPost, survivingPost], comments: [] }),
     );
 
     expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(2);
@@ -263,7 +268,7 @@ describe("RedditScanMatchingHandler - Gemini queue insertion error handling", ()
     );
     expect(mockedEnqueueCandidate).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ redditItemId: "t1_survives" }),
+      expect.objectContaining({ redditItemId: "t3_survives" }),
     );
   });
 

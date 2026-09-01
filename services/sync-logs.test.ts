@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
 import type { SyncLogRow } from "@/types/sync-logs";
 
@@ -258,6 +259,28 @@ describe("toSafeScanErrorMessage", () => {
     expect(toSafeScanErrorMessage(new Error("token=super-secret-value"))).toBe(
       "The scan failed. Please try again.",
     );
+  });
+
+  it("maps missing provider credentials without exposing APIFY_TOKEN", () => {
+    const message = toSafeScanErrorMessage(
+      new RedditProviderError("The Reddit scan provider is not configured.", {
+        code: "missing_credentials",
+        fatal: true,
+      }),
+    );
+
+    expect(message).toBe("Reddit scanning is not configured.");
+    expect(message).not.toMatch(/APIFY_TOKEN|apify/i);
+  });
+
+  it("maps other provider errors to a generic scan failure", () => {
+    expect(
+      toSafeScanErrorMessage(
+        new RedditProviderError("The Reddit scan provider run did not succeed.", {
+          code: "actor_failed",
+        }),
+      ),
+    ).toBe("The Reddit scan failed. Please try again.");
   });
 });
 

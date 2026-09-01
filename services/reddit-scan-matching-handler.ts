@@ -5,7 +5,6 @@ import type { GeminiEligibilityResult, QualificationReason } from "@/lib/matchin
 import type { OnboardingSearchTerms } from "@/lib/matching/matching-engine";
 import { matchRedditScanResult } from "@/lib/matching/reddit-scan-matcher";
 import type {
-  MatchedRedditComment,
   MatchedRedditPost,
   RedditScanMatchingResult,
 } from "@/lib/matching/reddit-scan-matcher";
@@ -41,19 +40,22 @@ import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-s
  *      `matching-engine.ts`).
  *   4. Every post (title + body combined) and every comment (body alone)
  *      is matched via `matchRedditScanResult`
- *      (`lib/matching/reddit-scan-matcher.ts`).
- *   5. Every matched post/comment is run through Phase 8's
+ *      (`lib/matching/reddit-scan-matcher.ts`). New scans are posts-only
+ *      (`comments: []`); comment matching remains for historical result
+ *      shapes only.
+ *   5. Every matched post is run through Phase 8's
  *      `evaluateGeminiEligibility` (`lib/matching/gemini-eligibility.ts`).
- *      Candidates with `qualifiesForGemini: true` are immediately persisted
+ *      Post candidates with `qualifiesForGemini: true` are immediately persisted
  *      to the `gemini_qualification_queue` database table via
  *      `enqueueCandidate` (`services/gemini-qualification-queue.ts`) -
  *      BEFORE any future Gemini processing - so a crash after this point
- *      can never lose a qualifying candidate. Non-qualifying candidates are
- *      never enqueued. This handler never talks to Supabase directly for
- *      the queue; all persistence goes through that dedicated service. A
- *      genuine DB insertion error for one candidate is caught and logged
- *      (not retried) rather than aborting the rest of the scan's
- *      candidates - see `safelyEnqueueCandidate` below.
+ *      can never lose a qualifying candidate. Comments are not enqueued.
+ *      Non-qualifying posts are never enqueued. This handler never talks
+ *      to Supabase directly for the queue; all persistence goes through
+ *      that dedicated service. A genuine DB insertion error for one
+ *      candidate is caught and logged (not retried) rather than aborting
+ *      the rest of the scan's candidates - see `safelyEnqueueCandidate`
+ *      below.
  *
  * `scanProjectReddit`'s return type (`Promise<RedditScanResult>`) is left
  * untouched - the collected Matching Engine results are exposed
@@ -117,11 +119,12 @@ export function mapProjectScanDataToOnboardingTerms(scanData: ProjectScanData): 
 }
 
 /**
- * Runs Phase 8 eligibility over every matched post/comment and persists
- * the Gemini-eligible ones to the database queue. Each candidate is
- * enqueued independently via `safelyEnqueueCandidate` - one candidate
- * failing to persist never stops the rest from being evaluated/queued,
- * since a scan should surface as many crash-safe candidates as possible.
+ * Runs Phase 8 eligibility over every matched post and persists the
+ * Gemini-eligible ones to the database queue. Comments are not enqueued.
+ * Each candidate is enqueued independently via `safelyEnqueueCandidate` -
+ * one candidate failing to persist never stops the rest from being
+ * evaluated/queued, since a scan should surface as many crash-safe
+ * candidates as possible.
  */
 async function enqueueGeminiEligibleCandidates(
   userId: string,
@@ -134,14 +137,6 @@ async function enqueueGeminiEligibleCandidates(
       continue;
     }
     await safelyEnqueueCandidate(buildPostCandidateInput(userId, projectId, matchedPost, eligibility));
-  }
-
-  for (const matchedComment of matchingResult.comments) {
-    const eligibility = evaluateGeminiEligibility(matchedComment.result);
-    if (!eligibility.qualifiesForGemini) {
-      continue;
-    }
-    await safelyEnqueueCandidate(buildCommentCandidateInput(userId, projectId, matchedComment, eligibility));
   }
 }
 
@@ -199,38 +194,6 @@ function buildPostCandidateInput(
     numComments: post.numComments,
     itemCreatedAt: post.createdAt,
     matchedTerms: matchedPost.result,
-    numericalScore: eligibility.numericalScore,
-    diversityBonus: eligibility.diversityBonus,
-    finalScore: eligibility.finalScore,
-    qualificationReason: toQueueQualificationReason(eligibility.qualificationReason),
-  };
-}
-
-function buildCommentCandidateInput(
-  userId: string,
-  projectId: string,
-  matchedComment: MatchedRedditComment,
-  eligibility: GeminiEligibilityResult,
-): EnqueueGeminiCandidateInput {
-  const { comment } = matchedComment;
-
-  return {
-    projectId,
-    userId,
-    redditItemId: comment.id,
-    itemType: "comment",
-    parentPostId: comment.postId,
-    subreddit: comment.subreddit,
-    title: null,
-    body: comment.body,
-    matchedText: matchedComment.text,
-    author: comment.author,
-    authorId: comment.authorId,
-    permalink: comment.permalink,
-    redditScore: comment.score,
-    numComments: null,
-    itemCreatedAt: comment.createdAt,
-    matchedTerms: matchedComment.result,
     numericalScore: eligibility.numericalScore,
     diversityBonus: eligibility.diversityBonus,
     finalScore: eligibility.finalScore,

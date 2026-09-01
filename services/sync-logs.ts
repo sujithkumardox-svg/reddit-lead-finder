@@ -1,5 +1,6 @@
 import "server-only";
 
+import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
 import { createClient } from "@/lib/supabase/server";
 import type {
@@ -74,6 +75,13 @@ function isStaleRunning(row: SyncLogRow, nowMs: number = Date.now()): boolean {
  * env values, tokens, or raw provider payloads.
  */
 export function toSafeScanErrorMessage(error: unknown): string {
+  if (error instanceof RedditProviderError) {
+    if (error.code === "missing_credentials") {
+      return "Reddit scanning is not configured.";
+    }
+    return "The Reddit scan failed. Please try again.";
+  }
+
   if (error instanceof RedditApiError) {
     if (/missing reddit api credentials/i.test(error.message)) {
       return "Reddit scanning is not configured.";
