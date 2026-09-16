@@ -3,6 +3,7 @@ import "server-only";
 import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
 import { createClient } from "@/lib/supabase/server";
+import type { ScanRunMetrics } from "@/types/scan-metrics";
 import type {
   ScanProgressStage,
   SyncLogRow,
@@ -154,18 +155,30 @@ export async function insertRunningScan(
   return mapRowToSyncLog(data as SyncLogRecord);
 }
 
-export async function markScanSuccess(syncLogId: string, leadsFound: number): Promise<void> {
+export async function markScanSuccess(
+  syncLogId: string,
+  leadsFound: number,
+  metrics?: ScanRunMetrics,
+): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
-    .from("sync_logs")
-    .update({
-      status: "success",
-      leads_found: leadsFound,
-      error_message: null,
-      completed_at: new Date().toISOString(),
-    })
-    .eq("id", syncLogId);
+  const payload: {
+    status: "success";
+    leads_found: number;
+    error_message: null;
+    completed_at: string;
+    metrics?: ScanRunMetrics;
+  } = {
+    status: "success",
+    leads_found: leadsFound,
+    error_message: null,
+    completed_at: new Date().toISOString(),
+  };
+  if (metrics !== undefined) {
+    payload.metrics = metrics;
+  }
+
+  const { error } = await supabase.from("sync_logs").update(payload).eq("id", syncLogId);
 
   if (error) {
     console.error("markScanSuccess Supabase error:", {
@@ -178,17 +191,28 @@ export async function markScanSuccess(syncLogId: string, leadsFound: number): Pr
   }
 }
 
-export async function markScanFailed(syncLogId: string, errorMessage: string): Promise<void> {
+export async function markScanFailed(
+  syncLogId: string,
+  errorMessage: string,
+  metrics?: ScanRunMetrics,
+): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
-    .from("sync_logs")
-    .update({
-      status: "failed",
-      error_message: errorMessage,
-      completed_at: new Date().toISOString(),
-    })
-    .eq("id", syncLogId);
+  const payload: {
+    status: "failed";
+    error_message: string;
+    completed_at: string;
+    metrics?: ScanRunMetrics;
+  } = {
+    status: "failed",
+    error_message: errorMessage,
+    completed_at: new Date().toISOString(),
+  };
+  if (metrics !== undefined) {
+    payload.metrics = metrics;
+  }
+
+  const { error } = await supabase.from("sync_logs").update(payload).eq("id", syncLogId);
 
   if (error) {
     console.error("markScanFailed Supabase error:", {

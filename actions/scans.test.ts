@@ -253,6 +253,40 @@ describe("getProjectScanStatusAction", () => {
     });
   });
 
+  it("success with zero leads = completed and still includes the dashboard redirect path", async () => {
+    mockUser({ id: "user-1" });
+    mockedGetLatest.mockResolvedValueOnce({
+      id: "sync-1",
+      projectId: "project-1",
+      userId: "user-1",
+      status: "success",
+      leadsFound: 0,
+      errorMessage: null,
+      startedAt: "2026-08-22T10:00:00.000Z",
+      completedAt: "2026-08-22T10:05:00.000Z",
+      createdAt: "2026-08-22T10:00:00.000Z",
+      updatedAt: "2026-08-22T10:05:00.000Z",
+    });
+    mockedInfer.mockReturnValueOnce("completed");
+
+    const result = await getProjectScanStatusAction("project-1");
+
+    // Zero leads must never be treated as an ongoing scan: "completed" and
+    // its dashboard redirect must still be returned exactly as they are
+    // for a non-zero lead count.
+    expect(mockedCountQueue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        stage: "completed",
+        syncLogId: "sync-1",
+        leadsFound: 0,
+        errorMessage: null,
+        dashboardPath: "/projects/project-1/dashboard",
+      },
+    });
+  });
+
   it("failed = failed and does not redirect", async () => {
     mockUser({ id: "user-1" });
     mockedGetLatest.mockResolvedValueOnce({

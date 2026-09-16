@@ -202,11 +202,13 @@ export function LeadCard({ lead, projectId }: { lead: RedditLeadRow; projectId: 
             )}
           </div>
 
-          <ReasonBadge
-            label={SAFETY_LABEL[lead.safetyBadge]}
-            reason={lead.safetyExplanation}
-            className={SAFETY_CLASS[lead.safetyBadge]}
-          />
+          {lead.safetyBadge ? (
+            <ReasonBadge
+              label={SAFETY_LABEL[lead.safetyBadge]}
+              reason={lead.safetyExplanation ?? ""}
+              className={SAFETY_CLASS[lead.safetyBadge]}
+            />
+          ) : null}
 
           <Button
             type="button"

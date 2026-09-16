@@ -2,17 +2,19 @@ import "server-only";
 
 import { evaluateGeminiEligibility } from "@/lib/matching/gemini-eligibility";
 import type { GeminiEligibilityResult, QualificationReason } from "@/lib/matching/gemini-eligibility";
-import type { OnboardingSearchTerms } from "@/lib/matching/matching-engine";
+import type { MatchingEngineResult, OnboardingSearchTerms } from "@/lib/matching/matching-engine";
 import { matchRedditScanResult } from "@/lib/matching/reddit-scan-matcher";
 import type {
   MatchedRedditPost,
   RedditScanMatchingResult,
 } from "@/lib/matching/reddit-scan-matcher";
+import { findSubredditMetrics, hasAnyMatchCategory } from "@/lib/scans/scan-metrics";
 import { enqueueCandidate } from "@/services/gemini-qualification-queue";
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
 import type { EnqueueGeminiCandidateInput, GeminiQueueQualificationReason } from "@/types/gemini-qualification-queue";
 import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-scan";
+import type { ScanRunMetrics, ScanSubredditMetrics } from "@/types/scan-metrics";
 
 /**
  * The pending Scanner -> Matching Engine connection.
@@ -73,10 +75,12 @@ import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-s
  */
 export class RedditScanMatchingHandler implements RedditScanResultHandler {
   private readonly userId: string;
+  private readonly metrics: ScanRunMetrics | undefined;
   private matchingResult: RedditScanMatchingResult | null = null;
 
-  constructor(userId: string) {
+  constructor(userId: string, metrics?: ScanRunMetrics) {
     this.userId = userId;
+    this.metrics = metrics;
   }
 
   async handleScanResult(result: RedditScanResult): Promise<void> {
@@ -86,9 +90,19 @@ export class RedditScanMatchingHandler implements RedditScanResultHandler {
     }
 
     const terms = mapProjectScanDataToOnboardingTerms(scanData);
+    const matchingStartedMs = Date.now();
     this.matchingResult = matchRedditScanResult(result, terms);
+    if (this.metrics) {
+      this.metrics.durationsMs.matching += Date.now() - matchingStartedMs;
+      recordMatchingMetrics(this.metrics, this.matchingResult);
+    }
 
-    await enqueueGeminiEligibleCandidates(this.userId, result.projectId, this.matchingResult);
+    await enqueueGeminiEligibleCandidates(
+      this.userId,
+      result.projectId,
+      this.matchingResult,
+      this.metrics,
+    );
   }
 
   /**
@@ -118,6 +132,64 @@ export function mapProjectScanDataToOnboardingTerms(scanData: ProjectScanData): 
   };
 }
 
+function recordMatchingMetrics(
+  metrics: ScanRunMetrics,
+  matchingResult: RedditScanMatchingResult,
+): void {
+  const keywordTerms = new Set<string>();
+  const competitorTerms = new Set<string>();
+  const hiddenTerms = new Set<string>();
+  const intentTerms = new Set<string>();
+  const painTerms = new Set<string>();
+
+  metrics.postsEnteringMatching += matchingResult.posts.length;
+
+  for (const matchedPost of matchingResult.posts) {
+    const result = matchedPost.result;
+    const bucket = findSubredditMetrics(metrics, matchedPost.post.subreddit);
+
+    if (result.keywords.length > 0) {
+      metrics.postsWithKeywordMatch++;
+      addMatchedTerms(keywordTerms, result.keywords);
+    }
+    if (result.competitors.length > 0) {
+      metrics.postsWithCompetitorMatch++;
+      addMatchedTerms(competitorTerms, result.competitors);
+    }
+    if (result.hiddenKeywordVariations.length > 0) {
+      metrics.postsWithHiddenMatch++;
+      addMatchedTerms(hiddenTerms, result.hiddenKeywordVariations);
+    }
+    if (result.intentPhrases.length > 0) {
+      metrics.postsWithIntentMatch++;
+      addMatchedTerms(intentTerms, result.intentPhrases);
+    }
+    if (result.painPhrases.length > 0) {
+      metrics.postsWithPainMatch++;
+      addMatchedTerms(painTerms, result.painPhrases);
+    }
+
+    if (hasAnyMatchCategory(result)) {
+      metrics.matchingCandidates++;
+      if (bucket) {
+        bucket.matchingCandidates++;
+      }
+    }
+  }
+
+  metrics.keywordMatchTerms += keywordTerms.size;
+  metrics.competitorMatchTerms += competitorTerms.size;
+  metrics.hiddenMatchTerms += hiddenTerms.size;
+  metrics.intentMatchTerms += intentTerms.size;
+  metrics.painMatchTerms += painTerms.size;
+}
+
+function addMatchedTerms(into: Set<string>, matches: MatchingEngineResult["keywords"]): void {
+  for (const match of matches) {
+    into.add(match.term);
+  }
+}
+
 /**
  * Runs Phase 8 eligibility over every matched post and persists the
  * Gemini-eligible ones to the database queue. Comments are not enqueued.
@@ -130,13 +202,46 @@ async function enqueueGeminiEligibleCandidates(
   userId: string,
   projectId: string,
   matchingResult: RedditScanMatchingResult,
+  metrics?: ScanRunMetrics,
 ): Promise<void> {
   for (const matchedPost of matchingResult.posts) {
+    const bucket = metrics ? findSubredditMetrics(metrics, matchedPost.post.subreddit) : undefined;
+    const phase8StartedMs = Date.now();
     const eligibility = evaluateGeminiEligibility(matchedPost.result);
+    if (metrics) {
+      metrics.durationsMs.phase8 += Date.now() - phase8StartedMs;
+      recordPhase8Metrics(metrics, eligibility, bucket);
+    }
     if (!eligibility.qualifiesForGemini) {
       continue;
     }
-    await safelyEnqueueCandidate(buildPostCandidateInput(userId, projectId, matchedPost, eligibility));
+    await safelyEnqueueCandidate(
+      buildPostCandidateInput(userId, projectId, matchedPost, eligibility),
+      metrics,
+      bucket,
+    );
+  }
+}
+
+function recordPhase8Metrics(
+  metrics: ScanRunMetrics,
+  eligibility: GeminiEligibilityResult,
+  bucket: ScanSubredditMetrics | undefined,
+): void {
+  if (!eligibility.qualifiesForGemini) {
+    metrics.phase8Failed++;
+    return;
+  }
+
+  metrics.phase8Passed++;
+  if (bucket) {
+    bucket.phase8Passed++;
+  }
+  if (eligibility.qualificationReason === "intent_or_pain") {
+    metrics.phase8IntentOrPain++;
+  }
+  if (eligibility.qualificationReason === "score_threshold") {
+    metrics.phase8ScoreThreshold++;
   }
 }
 
@@ -150,14 +255,36 @@ async function enqueueGeminiEligibleCandidates(
  * can never abort the rest of the scan's candidates. Never retried here -
  * a single attempt per candidate per scan.
  */
-async function safelyEnqueueCandidate(input: EnqueueGeminiCandidateInput): Promise<void> {
+async function safelyEnqueueCandidate(
+  input: EnqueueGeminiCandidateInput,
+  metrics?: ScanRunMetrics,
+  bucket?: ScanSubredditMetrics,
+): Promise<void> {
+  const queueStartedMs = Date.now();
   try {
-    await enqueueCandidate(input);
+    const row = await enqueueCandidate(input);
+    if (metrics) {
+      if (row) {
+        metrics.queueInserted++;
+        if (bucket) {
+          bucket.queueInserted++;
+        }
+      } else {
+        metrics.queueDuplicateSkipped++;
+      }
+    }
   } catch (error) {
+    if (metrics) {
+      metrics.queueInsertFailed++;
+    }
     console.error(
       `[reddit-scan-matching-handler] Failed to queue Gemini candidate ${input.redditItemId} for project ${input.projectId}:`,
       error,
     );
+  } finally {
+    if (metrics) {
+      metrics.durationsMs.queue += Date.now() - queueStartedMs;
+    }
   }
 }
 

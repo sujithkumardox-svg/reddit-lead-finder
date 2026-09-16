@@ -87,7 +87,7 @@ export default async function ProjectDashboardPage({
         </div>
         {recentLeads.length === 0 ? (
           <p className="rounded-xl border border-white/10 bg-neutral-900 px-4 py-8 text-sm text-neutral-400">
-            No qualified leads yet. New leads will show up here after qualification.
+            No leads found for this scan.
           </p>
         ) : (
           <div className="flex flex-col gap-4 md:flex-row md:flex-wrap">

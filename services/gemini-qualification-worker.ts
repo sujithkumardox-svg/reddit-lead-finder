@@ -6,7 +6,7 @@ import type {
   QualifyRedditCandidateOutput,
   QualifyRedditCandidateResult,
 } from "@/lib/ai/qualify-reddit-candidate";
-import { getSubredditSafety } from "@/lib/safety/subreddit-safety";
+import { createScanMetrics, findSubredditMetrics, recordGeminiScoreBucket } from "@/lib/scans/scan-metrics";
 import {
   claimNextPending,
   markFailed,
@@ -19,7 +19,8 @@ import { getProjectById } from "@/services/projects";
 import { persistQualifiedLead } from "@/services/reddit-leads";
 import type { GeminiQualificationQueueRow } from "@/types/gemini-qualification-queue";
 import type { Project } from "@/types/project";
-import type { PersistQualifiedLeadInput, SubredditSafetyResult } from "@/types/reddit-leads";
+import type { PersistQualifiedLeadInput } from "@/types/reddit-leads";
+import type { ScanRunMetrics } from "@/types/scan-metrics";
 
 /**
  * Gemini qualification worker (Phase 9C), extended by Phase 10 with a
@@ -36,12 +37,11 @@ import type { PersistQualifiedLeadInput, SubredditSafetyResult } from "@/types/r
  * primitives.
  *
  * Phase 10 addition: once Gemini has answered `aiQualified === true`, this
- * module looks up the candidate's subreddit safety (rule-based, via
- * `lib/safety/subreddit-safety.ts`) and persists the qualified lead via
- * `services/reddit-leads.ts` BEFORE the queue row is marked `completed`.
- * Persistence is no longer best-effort after completion: if persist
- * throws, the row stays recoverable (not `completed`) so a later claim
- * can retry the upsert safely.
+ * module persists the qualified lead via `services/reddit-leads.ts` BEFORE
+ * the queue row is marked `completed`. Subreddit safety lookup is deferred
+ * for the MVP and is not on this persist path. Persistence is no longer
+ * best-effort after completion: if persist throws, the row stays
+ * recoverable (not `completed`) so a later claim can retry the upsert safely.
  *
  * Crash-recovery fix, in two layers:
  *
@@ -154,11 +154,10 @@ function buildResultFromRecordedCandidate(
   };
 }
 
-/** Builds the Phase 10 `persistQualifiedLead` input from a claimed queue row plus its subreddit safety result. */
+/** Builds the Phase 10 `persistQualifiedLead` input from a claimed queue row and its Gemini result. */
 function buildPersistLeadInput(
   candidate: GeminiQualificationQueueRow,
   result: QualifyRedditCandidateResult,
-  safety: SubredditSafetyResult,
 ): PersistQualifiedLeadInput {
   return {
     projectId: candidate.projectId,
@@ -181,26 +180,21 @@ function buildPersistLeadInput(
     aiMatchReason: result.aiMatchReason,
     aiPossibleCompetitor: result.aiPossibleCompetitor,
     aiPossibleCompetitorReason: result.aiPossibleCompetitorReason,
-    safetyBadge: safety.badge,
-    safetyExplanation: safety.explanation,
   };
 }
 
 /**
- * Phase 10: looks up the candidate's subreddit safety (cached per-run via
- * `safetyCache`) and persists it as a qualified lead. Called after
+ * Persists a Gemini-qualified candidate as a lead. Called after
  * `recordGeminiResult` and BEFORE `saveQualificationResult` marks the
  * queue row `completed`. Errors propagate so the caller does not mark the
  * row completed; `persistQualifiedLead` is an upsert, so a later retry is
- * safe.
+ * safe. Safety Badges are deferred and are not fetched here.
  */
 async function persistQualifiedLeadOrThrow(
   candidate: GeminiQualificationQueueRow,
   result: QualifyRedditCandidateResult,
-  safetyCache: Map<string, SubredditSafetyResult>,
 ): Promise<void> {
-  const safety = await getSubredditSafety(candidate.subreddit, safetyCache);
-  await persistQualifiedLead(buildPersistLeadInput(candidate, result, safety));
+  await persistQualifiedLead(buildPersistLeadInput(candidate, result));
 }
 
 /**
@@ -241,18 +235,12 @@ async function persistQualifiedLeadOrThrow(
  * Returns `{ outcome: "no_pending_candidates" }` when the queue is empty,
  * so a caller can stop looping without treating that as an error.
  *
- * `safetyCache` is an optional in-memory `Map` used to fetch each distinct
- * subreddit's Reddit rules at most once across many calls - pass the same
- * `Map` into every call within one worker run to get that behavior (see
- * `runGeminiQualificationWorker`). Omitting it (e.g. a one-off call) simply
- * means no cross-call caching, not incorrect behavior.
- *
  * `projectId`, when provided, is forwarded to `claimNextPending` so this
  * call only claims that project's pending rows.
  */
 export async function processNextGeminiQualificationCandidate(
-  safetyCache: Map<string, SubredditSafetyResult> = new Map(),
   projectId?: string,
+  metrics?: ScanRunMetrics,
 ): Promise<ProcessCandidateOutcome> {
   const claimed = await claimNextPending(projectId);
   if (!claimed) {
@@ -260,6 +248,7 @@ export async function processNextGeminiQualificationCandidate(
   }
 
   let result: QualifyRedditCandidateResult;
+  let persistFailedThisCandidate = false;
   try {
     if (candidateAlreadyHasGeminiResult(claimed)) {
       // Crash-recovery path: Gemini already answered for this exact row in
@@ -267,6 +256,9 @@ export async function processNextGeminiQualificationCandidate(
       // worker crashed. Reuse that already-paid-for result - never call
       // Gemini again for it.
       result = buildResultFromRecordedCandidate(claimed);
+      if (metrics) {
+        metrics.geminiDuplicateSkips++;
+      }
     } else {
       // PRE-call checkpoint: durably record that a Gemini call is about to
       // be attempted for this exact row BEFORE doing anything that could
@@ -282,15 +274,49 @@ export async function processNextGeminiQualificationCandidate(
         throw new Error(`Project ${claimed.projectId} not found.`);
       }
 
-      result = await qualifyRedditCandidate(buildQualificationInput(claimed, project));
+      const geminiStartedMs = Date.now();
+      if (metrics) {
+        metrics.geminiCallsPerformed++;
+      }
+      try {
+        result = await qualifyRedditCandidate(buildQualificationInput(claimed, project));
+      } finally {
+        if (metrics) {
+          metrics.durationsMs.gemini += Date.now() - geminiStartedMs;
+        }
+      }
       // POST-call checkpoint: durably record the result BEFORE anything
       // else, so a crash before persist / saveQualificationResult can
       // never cause this candidate to be sent to Gemini a second time.
       await recordGeminiResult(claimed.id, result);
     }
 
+    if (metrics) {
+      recordGeminiScoreBucket(metrics, result.aiScore);
+    }
+
     if (result.aiQualified) {
-      await persistQualifiedLeadOrThrow(claimed, result, safetyCache);
+      const persistStartedMs = Date.now();
+      try {
+        await persistQualifiedLeadOrThrow(claimed, result);
+        if (metrics) {
+          metrics.leadsPersisted++;
+          const bucket = findSubredditMetrics(metrics, claimed.subreddit);
+          if (bucket) {
+            bucket.qualifiedLeads++;
+          }
+        }
+      } catch (error) {
+        persistFailedThisCandidate = true;
+        if (metrics) {
+          metrics.persistFailed++;
+        }
+        throw error;
+      } finally {
+        if (metrics) {
+          metrics.durationsMs.persist += Date.now() - persistStartedMs;
+        }
+      }
     }
 
     await saveQualificationResult(claimed.id, result);
@@ -301,8 +327,15 @@ export async function processNextGeminiQualificationCandidate(
       `[gemini-qualification-worker] Failed to qualify candidate ${claimed.id}:`,
       error,
     );
+    if (metrics && !persistFailedThisCandidate) {
+      metrics.geminiErrors++;
+    }
     await markFailed(claimed.id, message);
     return { outcome: "failed", queueId: claimed.id, error: message };
+  }
+
+  if (metrics && result.aiQualified) {
+    metrics.qualified++;
   }
 
   return { outcome: "processed", queueId: claimed.id, aiQualified: result.aiQualified };
@@ -312,11 +345,20 @@ export type GeminiQualificationWorkerSummary = {
   processed: number;
   qualified: number;
   failed: number;
+  geminiCallsPerformed: number;
+  geminiDuplicateSkips: number;
+  geminiErrors: number;
+  strong8to10: number;
+  partial6to7: number;
+  notQualified0to5: number;
+  leadsPersisted: number;
+  persistFailed: number;
 };
 
 export type GeminiQualificationWorkerOptions = {
   projectId?: string;
   maxCandidates?: number;
+  metrics?: ScanRunMetrics;
 };
 
 function resolveWorkerOptions(
@@ -343,26 +385,33 @@ function resolveWorkerOptions(
  * never drains another project's pending rows. Omitting it preserves the
  * existing global worker behavior.
  *
- * Creates a single subreddit-safety cache (Phase 10) for the whole run and
- * passes it into every `processNextGeminiQualificationCandidate` call, so
- * a subreddit seen more than once in the same run only triggers one Reddit
- * rules fetch.
- *
  * This function is not itself a scheduler - something else (a cron job,
  * route handler, etc.) is expected to invoke it on a schedule.
  */
 export async function runGeminiQualificationWorker(
   options?: number | GeminiQualificationWorkerOptions,
 ): Promise<GeminiQualificationWorkerSummary> {
-  const { projectId, maxCandidates } = resolveWorkerOptions(options);
+  const { projectId, maxCandidates, metrics } = resolveWorkerOptions(options);
+  const acc = metrics ?? createScanMetrics(projectId ?? "", "");
 
   await recoverStaleProcessing(undefined, projectId);
 
-  const safetyCache = new Map<string, SubredditSafetyResult>();
-  const summary: GeminiQualificationWorkerSummary = { processed: 0, qualified: 0, failed: 0 };
+  const summary: GeminiQualificationWorkerSummary = {
+    processed: 0,
+    qualified: 0,
+    failed: 0,
+    geminiCallsPerformed: 0,
+    geminiDuplicateSkips: 0,
+    geminiErrors: 0,
+    strong8to10: 0,
+    partial6to7: 0,
+    notQualified0to5: 0,
+    leadsPersisted: 0,
+    persistFailed: 0,
+  };
 
   while (maxCandidates === undefined || summary.processed + summary.failed < maxCandidates) {
-    const outcome = await processNextGeminiQualificationCandidate(safetyCache, projectId);
+    const outcome = await processNextGeminiQualificationCandidate(projectId, acc);
 
     if (outcome.outcome === "no_pending_candidates") {
       break;
@@ -377,6 +426,15 @@ export async function runGeminiQualificationWorker(
       summary.failed++;
     }
   }
+
+  summary.geminiCallsPerformed = acc.geminiCallsPerformed;
+  summary.geminiDuplicateSkips = acc.geminiDuplicateSkips;
+  summary.geminiErrors = acc.geminiErrors;
+  summary.strong8to10 = acc.strong8to10;
+  summary.partial6to7 = acc.partial6to7;
+  summary.notQualified0to5 = acc.notQualified0to5;
+  summary.leadsPersisted = acc.leadsPersisted;
+  summary.persistFailed = acc.persistFailed;
 
   return summary;
 }

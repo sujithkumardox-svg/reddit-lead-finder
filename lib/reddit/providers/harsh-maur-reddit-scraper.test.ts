@@ -84,16 +84,26 @@ afterEach(() => {
 });
 
 describe("buildHarshMaurActorInput", () => {
-  it("passes the full search-term list, one subreddit, and posts-only flags", () => {
-    const searchTerms = ["lead generation", "looking for an alternative", "Syften"];
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
 
-    expect(
-      buildHarshMaurActorInput({
-        subreddit: "SaaS",
-        searchTerms,
-        postsPerQuery: 25,
-      }),
-    ).toEqual({
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("passes the full search-term list, one subreddit, posts-only flags, postsPerQuery cap, and rolling 7-day bounds", () => {
+    const searchTerms = ["lead generation", "looking for an alternative", "Syften"];
+    const input = buildHarshMaurActorInput({
+      subreddit: "SaaS",
+      searchTerms,
+      postsPerQuery: 25,
+    });
+
+    expect(input).toEqual({
       searchTerms,
       withinCommunity: "r/SaaS",
       searchPosts: true,
@@ -104,8 +114,27 @@ describe("buildHarshMaurActorInput", () => {
       searchSort: "new",
       includeNSFW: false,
       aiAnalysis: false,
-      maxPostsCount: 75,
+      maxPostsCount: 25,
+      postedAfter: "2026-08-27T12:00:00.000Z",
+      postedBefore: "2026-09-03T12:00:00.000Z",
     });
+    expect(input).not.toHaveProperty("subredditUrls");
+    expect(new Date(input.postedAfter).getTime()).toBeLessThan(new Date(input.postedBefore).getTime());
+    expect(new Date(input.postedBefore).getTime() - new Date(input.postedAfter).getTime()).toBe(
+      sevenDaysMs,
+    );
+  });
+
+  it("sets maxPostsCount to postsPerQuery rather than postsPerQuery times term count", () => {
+    const input = buildHarshMaurActorInput({
+      subreddit: "startups",
+      searchTerms: ["alpha", "beta", "gamma", "delta", "epsilon"],
+      postsPerQuery: 10,
+    });
+
+    expect(input.maxPostsCount).toBe(10);
+    expect(input.maxPostsCount).not.toBe(10 * 5);
+    expect(input.searchTerms).toHaveLength(5);
   });
 
   it("does not quote multi-word terms", () => {
@@ -181,16 +210,32 @@ describe("HarshMaurRedditScraper", () => {
     expect(mockActor).toHaveBeenCalledTimes(1);
     expect(mockActor).toHaveBeenCalledWith("harshmaur/reddit-scraper");
     expect(mockCall).toHaveBeenCalledTimes(1);
-    expect(mockCall.mock.calls[0][0]).toEqual(
-      buildHarshMaurActorInput({
-        subreddit: "SaaS",
-        searchTerms,
-        postsPerQuery: 25,
-      }),
-    );
+    expect(mockCall.mock.calls[0][0]).toMatchObject({
+      searchTerms,
+      withinCommunity: "r/SaaS",
+      searchPosts: true,
+      searchComments: false,
+      searchCommunities: false,
+      crawlCommentsPerPost: false,
+      searchTime: "week",
+      searchSort: "new",
+      includeNSFW: false,
+      aiAnalysis: false,
+      maxPostsCount: 25,
+    });
+    expect(mockCall.mock.calls[0][0]).not.toHaveProperty("subredditUrls");
     expect(mockCall.mock.calls[0][0].searchComments).toBe(false);
     expect(mockCall.mock.calls[0][0].crawlCommentsPerPost).toBe(false);
     expect(mockCall.mock.calls[0][0].searchPosts).toBe(true);
+    expect(mockCall.mock.calls[0][0].postedAfter).toEqual(expect.any(String));
+    expect(mockCall.mock.calls[0][0].postedBefore).toEqual(expect.any(String));
+    expect(new Date(mockCall.mock.calls[0][0].postedAfter).getTime()).toBeLessThan(
+      new Date(mockCall.mock.calls[0][0].postedBefore).getTime(),
+    );
+    expect(
+      new Date(mockCall.mock.calls[0][0].postedBefore).getTime() -
+        new Date(mockCall.mock.calls[0][0].postedAfter).getTime(),
+    ).toBe(7 * 24 * 60 * 60 * 1000);
     expect(posts).toHaveLength(1);
     expect(posts[0].id).toBe("t3_abc123");
   });

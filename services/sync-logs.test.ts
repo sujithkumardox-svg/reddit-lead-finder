@@ -117,6 +117,22 @@ describe("markScanSuccess", () => {
     );
     expect(chain.eq).toHaveBeenCalledWith("id", "sync-1");
   });
+
+  it("persists metrics onto the same row when provided", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+    const metrics = { projectId: "project-1", syncLogId: "sync-1", leadsFound: 4 };
+
+    await markScanSuccess("sync-1", 4, metrics as never);
+
+    expect(chain.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "success",
+        leads_found: 4,
+        metrics,
+      }),
+    );
+  });
 });
 
 describe("markScanFailed", () => {
@@ -134,6 +150,22 @@ describe("markScanFailed", () => {
       }),
     );
     expect(chain.eq).toHaveBeenCalledWith("id", "sync-1");
+  });
+
+  it("persists partial metrics onto the same failed row when provided", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+    const metrics = { projectId: "project-1", syncLogId: "sync-1", rawPosts: 3 };
+
+    await markScanFailed("sync-1", "The Reddit scan failed. Please try again.", metrics as never);
+
+    expect(chain.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "failed",
+        error_message: "The Reddit scan failed. Please try again.",
+        metrics,
+      }),
+    );
   });
 });
 

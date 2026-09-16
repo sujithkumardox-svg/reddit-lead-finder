@@ -101,8 +101,6 @@ function makePostLeadInput(overrides: Partial<PersistQualifiedLeadInput> = {}): 
     aiMatchReason: "Explicitly asks for recommendations.",
     aiPossibleCompetitor: null,
     aiPossibleCompetitorReason: null,
-    safetyBadge: "without_rules",
-    safetyExplanation: "This subreddit has no posted rules.",
     ...overrides,
   };
 }
@@ -168,7 +166,7 @@ describe("persistQualifiedLead", () => {
     );
   });
 
-  it("3. persists the full AI result including ai_possible_competitor_reason and the safety badge/explanation", async () => {
+  it("3. persists the full AI result including ai_possible_competitor_reason and writes null safety when omitted", async () => {
     const chain = createChain({ data: null, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
@@ -176,8 +174,6 @@ describe("persistQualifiedLead", () => {
       makePostLeadInput({
         aiPossibleCompetitor: "Syften",
         aiPossibleCompetitorReason: "The author says they currently use Syften.",
-        safetyBadge: "promo_not_safe",
-        safetyExplanation: "Rule \"No self-promotion\" explicitly bans promotion.",
       }),
     );
 
@@ -189,6 +185,26 @@ describe("persistQualifiedLead", () => {
         ai_match_reason: "Explicitly asks for recommendations.",
         ai_possible_competitor: "Syften",
         ai_possible_competitor_reason: "The author says they currently use Syften.",
+        safety_badge: null,
+        safety_explanation: null,
+      }),
+      { onConflict: "project_id,reddit_item_id" },
+    );
+  });
+
+  it("3b. still writes an explicit safety badge when one is provided", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await persistQualifiedLead(
+      makePostLeadInput({
+        safetyBadge: "promo_not_safe",
+        safetyExplanation: "Rule \"No self-promotion\" explicitly bans promotion.",
+      }),
+    );
+
+    expect(chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
         safety_badge: "promo_not_safe",
         safety_explanation: "Rule \"No self-promotion\" explicitly bans promotion.",
       }),
@@ -316,8 +332,9 @@ describe("listLeadsByProject", () => {
     const [lead] = await listLeadsByProject("user-1", "project-1");
     expect(lead.author).toBe("[deleted]");
     expect(lead.content).toBe("");
-    expect(lead.safetyBadge).toBe("without_rules");
-    expect(lead.safetyExplanation).toBe("");
+    expect(lead.safetyBadge).toBeNull();
+    expect(lead.safetyExplanation).toBeNull();
+    expect(lead.safetyBadge).not.toBe("without_rules");
   });
 
   it("6. throws on a genuine database error", async () => {

@@ -62,10 +62,10 @@ const SAFETY_BADGES: readonly SubredditSafetyBadge[] = [
 
 const LEAD_STATUSES: readonly RedditLeadStatus[] = ["new", "reviewed", "contacted", "ignored"];
 
-function asSafetyBadge(value: unknown): SubredditSafetyBadge {
+function asSafetyBadge(value: unknown): SubredditSafetyBadge | null {
   return SAFETY_BADGES.includes(value as SubredditSafetyBadge)
     ? (value as SubredditSafetyBadge)
-    : "without_rules";
+    : null;
 }
 
 function asLeadStatus(value: unknown): RedditLeadStatus {
@@ -98,7 +98,7 @@ function mapRowToLeadRow(row: LeadRowRecord): RedditLeadRow {
     aiPossibleCompetitor: row.ai_possible_competitor as string | null,
     aiPossibleCompetitorReason: row.ai_possible_competitor_reason as string | null,
     safetyBadge: asSafetyBadge(row.safety_badge),
-    safetyExplanation: (row.safety_explanation as string | null) ?? "",
+    safetyExplanation: (row.safety_explanation as string | null) ?? null,
     status: asLeadStatus(row.status),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -145,8 +145,8 @@ export async function persistQualifiedLead(input: PersistQualifiedLeadInput): Pr
       ai_match_reason: input.aiMatchReason,
       ai_possible_competitor: input.aiPossibleCompetitor,
       ai_possible_competitor_reason: input.aiPossibleCompetitorReason,
-      safety_badge: input.safetyBadge,
-      safety_explanation: input.safetyExplanation,
+      safety_badge: input.safetyBadge ?? null,
+      safety_explanation: input.safetyExplanation ?? null,
     },
     { onConflict: "project_id,reddit_item_id" },
   );

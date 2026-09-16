@@ -53,7 +53,19 @@ beforeEach(() => {
     posts: [],
     comments: [],
   });
-  mockedRunWorker.mockResolvedValue({ processed: 1, qualified: 1, failed: 0 });
+  mockedRunWorker.mockResolvedValue({
+    processed: 1,
+    qualified: 1,
+    failed: 0,
+    geminiCallsPerformed: 1,
+    geminiDuplicateSkips: 0,
+    geminiErrors: 0,
+    strong8to10: 1,
+    partial6to7: 0,
+    notQualified0to5: 0,
+    leadsPersisted: 1,
+    persistFailed: 0,
+  });
   mockedGetScanById.mockResolvedValue({
     id: "sync-1",
     projectId: "project-1",
@@ -82,13 +94,63 @@ describe("runProjectScan", () => {
     expect(mockedScanProjectReddit).toHaveBeenCalledTimes(1);
     const [, , handler] = mockedScanProjectReddit.mock.calls[0];
     expect(handler).toBeInstanceOf(RedditScanMatchingHandler);
-    expect(mockedRunWorker).toHaveBeenCalledWith({ projectId: "project-1" });
+    expect(mockedRunWorker).toHaveBeenCalledWith({
+      projectId: "project-1",
+      metrics: expect.objectContaining({
+        projectId: "project-1",
+        syncLogId: "sync-1",
+      }),
+    });
     expect(mockedCountLeads).toHaveBeenCalledWith(
       "user-1",
       "project-1",
       "2026-08-22T10:00:00.000Z",
     );
-    expect(mockedMarkSuccess).toHaveBeenCalledWith("sync-1", 1);
+    expect(mockedMarkSuccess).toHaveBeenCalledWith(
+      "sync-1",
+      1,
+      expect.objectContaining({
+        projectId: "project-1",
+        syncLogId: "sync-1",
+        leadsFound: 1,
+        qualified: 1,
+      }),
+    );
+    expect(mockedMarkFailed).not.toHaveBeenCalled();
+  });
+
+  it("marks sync_logs success even when zero leads are found - completion must not depend on lead count", async () => {
+    mockedRunWorker.mockResolvedValueOnce({
+      processed: 0,
+      qualified: 0,
+      failed: 0,
+      geminiCallsPerformed: 0,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 0,
+      strong8to10: 0,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 0,
+      persistFailed: 0,
+    });
+    mockedCountLeads.mockResolvedValueOnce(0);
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+    });
+
+    expect(mockedMarkSuccess).toHaveBeenCalledWith(
+      "sync-1",
+      0,
+      expect.objectContaining({
+        projectId: "project-1",
+        syncLogId: "sync-1",
+        leadsFound: 0,
+        qualified: 0,
+      }),
+    );
     expect(mockedMarkFailed).not.toHaveBeenCalled();
   });
 
@@ -107,7 +169,14 @@ describe("runProjectScan", () => {
 
     expect(mockedRunWorker).not.toHaveBeenCalled();
     expect(mockedMarkSuccess).not.toHaveBeenCalled();
-    expect(mockedMarkFailed).toHaveBeenCalledWith("sync-1", "Reddit scanning is not configured.");
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "Reddit scanning is not configured.",
+      expect.objectContaining({
+        projectId: "project-1",
+        syncLogId: "sync-1",
+      }),
+    );
     const [, message] = mockedMarkFailed.mock.calls[0];
     expect(message).not.toMatch(/REDDIT_CLIENT_SECRET|CLIENT_ID/i);
   });
@@ -123,8 +192,20 @@ describe("runProjectScan", () => {
       "scheduler-user",
       "scheduler-project",
       expect.any(RedditScanMatchingHandler),
+      expect.objectContaining({
+        metrics: expect.objectContaining({
+          projectId: "scheduler-project",
+          syncLogId: "sync-sched",
+        }),
+      }),
     );
-    expect(mockedRunWorker).toHaveBeenCalledWith({ projectId: "scheduler-project" });
-    expect(mockedScanProjectReddit.mock.calls[0].length).toBe(3);
+    expect(mockedRunWorker).toHaveBeenCalledWith({
+      projectId: "scheduler-project",
+      metrics: expect.objectContaining({
+        projectId: "scheduler-project",
+        syncLogId: "sync-sched",
+      }),
+    });
+    expect(mockedScanProjectReddit.mock.calls[0].length).toBe(4);
   });
 });

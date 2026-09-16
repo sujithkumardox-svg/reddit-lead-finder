@@ -22,6 +22,7 @@ import { applyFreePlanTestLimits } from "@/lib/reddit/free-plan-test-limits";
 import type { RedditPostSearchProvider } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { getPostComments } from "@/lib/reddit/reddit-listings";
+import { createScanMetrics } from "@/lib/scans/scan-metrics";
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
 import { scanProjectReddit } from "@/services/reddit-scanner";
@@ -123,6 +124,35 @@ describe("scanProjectReddit", () => {
     );
   });
 
+  it("passes a dynamic T=3 S=1 request through to the provider without network I/O (local fixture, not production constants)", async () => {
+    const scanData = makeScanData({
+      keywords: ["alpha"],
+      intentPhrases: ["looking for a tool"],
+      painPhrases: ["too expensive"],
+      competitors: [],
+      hiddenKeywords: [],
+      subreddits: ["startups"],
+    });
+    mockedGetProjectScanData.mockResolvedValue(scanData);
+    const expectedTerms = buildSearchTerms(scanData);
+    const provider = makeFakeProvider(async () => []);
+    const handler = makeHandler();
+
+    await scanProjectReddit("user-1", "project-1", handler, {
+      provider,
+      postsPerQuery: 25,
+    });
+
+    expect(expectedTerms).toHaveLength(3);
+    expect(provider.searchPosts).toHaveBeenCalledTimes(1);
+    expect(provider.searchPosts).toHaveBeenCalledWith({
+      subreddit: "startups",
+      searchTerms: expectedTerms,
+      postsPerQuery: 25,
+    });
+    expect(provider.searchPosts.mock.calls[0][0].searchTerms).toHaveLength(3);
+  });
+
   it("with the temporary overlay on, 4 test subreddits produce exactly 4 provider calls of 39 test terms", async () => {
     process.env.USE_FREE_PLAN_TEST_LIMITS = "true";
     const scanData = makeScanData({
@@ -201,7 +231,7 @@ describe("scanProjectReddit", () => {
     expect(result.posts[0].id).toBe("t3_dup");
   });
 
-  it("applies the per-subreddit cap after the 7-day filter", async () => {
+  it("keeps every in-window post after the 7-day filter with no per-subreddit cap", async () => {
     mockedGetProjectScanData.mockResolvedValue(makeScanData({ subreddits: ["SaaS"] }));
     const provider = makeFakeProvider(async () =>
       Array.from({ length: 60 }, (_, i) =>
@@ -210,12 +240,9 @@ describe("scanProjectReddit", () => {
     );
     const handler = makeHandler();
 
-    const result = await scanProjectReddit("user-1", "project-1", handler, {
-      provider,
-      maxPostsPerSubreddit: 50,
-    });
+    const result = await scanProjectReddit("user-1", "project-1", handler, { provider });
 
-    expect(result.posts).toHaveLength(50);
+    expect(result.posts).toHaveLength(60);
   });
 
   it("skips a subreddit on a non-fatal provider error and continues others", async () => {
@@ -258,5 +285,87 @@ describe("scanProjectReddit", () => {
       fatal: true,
     });
     expect(handler.handleScanResult).not.toHaveBeenCalled();
+  });
+});
+
+describe("scanProjectReddit - forensic metrics", () => {
+  it("records per-subreddit success/failure, window filter, and dedupe counts without changing provider input", async () => {
+    mockedGetProjectScanData.mockResolvedValue(
+      makeScanData({ subreddits: ["SaaS", "startups"] }),
+    );
+    const scanData = makeScanData({ subreddits: ["SaaS", "startups"] });
+    const expectedTerms = buildSearchTerms(scanData);
+    const provider = makeFakeProvider(async ({ subreddit }) => {
+      if (subreddit === "SaaS") {
+        return [
+          makePost({ id: "t3_old", createdAt: "2026-08-20T12:00:00.000Z" }),
+          makePost({ id: "t3_keep", createdAt: "2026-08-28T12:00:00.000Z" }),
+        ];
+      }
+      throw new RedditProviderError("The Reddit scan provider run did not succeed.", {
+        code: "actor_failed",
+        fatal: false,
+      });
+    });
+    const handler = makeHandler();
+    const metrics = createScanMetrics("project-1", "sync-1");
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await scanProjectReddit("user-1", "project-1", handler, { provider, metrics });
+
+    expect(provider.searchPosts).toHaveBeenCalledTimes(2);
+    expect(provider.searchPosts).toHaveBeenNthCalledWith(1, {
+      subreddit: "SaaS",
+      searchTerms: expectedTerms,
+      postsPerQuery: 25,
+    });
+    expect(result.posts.map((post) => post.id)).toEqual(["t3_keep"]);
+    expect(metrics.subredditsAttempted).toBe(2);
+    expect(metrics.subredditsSucceeded).toBe(1);
+    expect(metrics.subredditsFailed).toBe(1);
+    expect(metrics.rawPosts).toBe(2);
+    expect(metrics.inWindowPosts).toBe(1);
+    expect(metrics.outOfWindowPosts).toBe(1);
+    expect(metrics.postsAfterDedupe).toBe(1);
+    expect(metrics.duplicatesRemoved).toBe(0);
+    expect(metrics.subreddits).toHaveLength(2);
+    expect(metrics.subreddits[0]).toEqual(
+      expect.objectContaining({
+        name: "SaaS",
+        status: "succeeded",
+        rawPosts: 2,
+        inWindowPosts: 1,
+        outOfWindowPosts: 1,
+        postsAfterDedupe: 1,
+      }),
+    );
+    expect(metrics.subreddits[1]).toEqual(
+      expect.objectContaining({
+        name: "startups",
+        status: "failed",
+        rawPosts: 0,
+      }),
+    );
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("counts duplicates removed after the existing global dedupe", async () => {
+    mockedGetProjectScanData.mockResolvedValue(
+      makeScanData({ subreddits: ["SaaS", "startups"] }),
+    );
+    const duplicate = makePost({ id: "t3_dup", createdAt: "2026-08-28T12:00:00.000Z" });
+    const provider = makeFakeProvider(async ({ subreddit }) => [{ ...duplicate, subreddit }]);
+    const handler = makeHandler();
+    const metrics = createScanMetrics("project-1", "sync-1");
+
+    await scanProjectReddit("user-1", "project-1", handler, { provider, metrics });
+
+    expect(metrics.rawPosts).toBe(2);
+    expect(metrics.inWindowPosts).toBe(2);
+    expect(metrics.postsAfterDedupe).toBe(1);
+    expect(metrics.duplicatesRemoved).toBe(1);
+    expect(metrics.subreddits[0].postsAfterDedupe).toBe(1);
+    expect(metrics.subreddits[1].postsAfterDedupe).toBe(0);
   });
 });

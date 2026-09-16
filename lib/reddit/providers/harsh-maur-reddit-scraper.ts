@@ -13,6 +13,8 @@ const HARSH_MAUR_ACTOR_ID = "harshmaur/reddit-scraper";
 const DATASET_PAGE_SIZE = 1000;
 const MAX_APIFY_START_ATTEMPTS = 3;
 const APIFY_START_RETRY_DELAY_MS = 1_000;
+const PROVIDER_SCAN_WINDOW_DAYS = 7;
+const PROVIDER_SCAN_WINDOW_MS = PROVIDER_SCAN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 type HarshMaurActorInput = {
   searchTerms: string[];
@@ -26,10 +28,13 @@ type HarshMaurActorInput = {
   includeNSFW: false;
   aiAnalysis: false;
   maxPostsCount: number;
+  postedAfter: string;
+  postedBefore: string;
 };
 
 export function buildHarshMaurActorInput(request: RedditPostSearchRequest): HarshMaurActorInput {
   const subreddit = request.subreddit.trim().replace(/^r\//i, "");
+  const nowMs = Date.now();
 
   return {
     searchTerms: request.searchTerms,
@@ -38,15 +43,20 @@ export function buildHarshMaurActorInput(request: RedditPostSearchRequest): Hars
     searchComments: false,
     searchCommunities: false,
     crawlCommentsPerPost: false,
+    // Harmless leftover. postedAfter/postedBefore are the active 7-day
+    // restriction; the Actor ignores searchTime when those bounds are set.
     searchTime: "week",
     searchSort: "new",
     includeNSFW: false,
     aiAnalysis: false,
-    // maxPostsCount scope is still unresolved (README: per-term; schema: global).
-    // Do not pass postsPerQuery alone. Compute from the live term list so a
-    // multi-term run is not starved if the cap is global. Never hard-code a
-    // test term count.
-    maxPostsCount: request.postsPerQuery * Math.max(request.searchTerms.length, 1),
+    // Pass postsPerQuery through unchanged. Do not multiply by term count:
+    // README documents maxPostsCount as per-term for searchTerms, and a
+    // live run with maxPostsCount = postsPerQuery * T stored more than that
+    // integer, so it is not a reliable global cap. T and S are controlled
+    // before the Actor call, not by inventing a global-limit field.
+    maxPostsCount: request.postsPerQuery,
+    postedAfter: new Date(nowMs - PROVIDER_SCAN_WINDOW_MS).toISOString(),
+    postedBefore: new Date(nowMs).toISOString(),
   };
 }
 

@@ -22,10 +22,12 @@ vi.mock("@/services/gemini-qualification-queue", () => ({
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
 import { enqueueCandidate } from "@/services/gemini-qualification-queue";
+import { createScanMetrics } from "@/lib/scans/scan-metrics";
 import {
   RedditScanMatchingHandler,
   mapProjectScanDataToOnboardingTerms,
 } from "@/services/reddit-scan-matching-handler";
+import type { GeminiQualificationQueueRow } from "@/types/gemini-qualification-queue";
 import type { RedditCommentItem } from "@/types/reddit-scan";
 
 const mockedGetProjectScanData = vi.mocked(getProjectScanData);
@@ -286,5 +288,67 @@ describe("RedditScanMatchingHandler - Gemini queue insertion error handling", ()
     // the queue failure isn't retried and doesn't corrupt/discard them.
     expect(handler.getMatchingResult()).not.toBeNull();
     expect(handler.getMatchingResult()!.posts).toHaveLength(1);
+  });
+});
+
+describe("RedditScanMatchingHandler - forensic metrics", () => {
+  it("records matching, Phase 8, and queue insert/duplicate/failure around existing paths", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    mockedEnqueueCandidate
+      .mockResolvedValueOnce({ id: "queue-inserted" } as GeminiQualificationQueueRow)
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("connection refused"));
+
+    const metrics = createScanMetrics("project-1", "sync-1");
+    metrics.subreddits.push({
+      name: "SaaS",
+      status: "succeeded",
+      startedAt: "2026-08-01T00:00:00.000Z",
+      completedAt: "2026-08-01T00:01:00.000Z",
+      durationMs: 1000,
+      rawPosts: 3,
+      inWindowPosts: 3,
+      outOfWindowPosts: 0,
+      postsAfterDedupe: 3,
+      matchingCandidates: 0,
+      phase8Passed: 0,
+      queueInserted: 0,
+      qualifiedLeads: 0,
+    });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const handler = new RedditScanMatchingHandler("user-1", metrics);
+    await handler.handleScanResult(
+      makeScanResult({
+        posts: [
+          makePost({ id: "t3_insert" }),
+          makePost({ id: "t3_dup" }),
+          makePost({ id: "t3_fail" }),
+          makePost({ id: "t3_nomatch", title: "Just chatting", body: "Nothing relevant here." }),
+        ],
+        comments: [],
+      }),
+    );
+
+    expect(metrics.postsEnteringMatching).toBe(4);
+    expect(metrics.matchingCandidates).toBe(3);
+    expect(metrics.postsWithIntentMatch).toBe(3);
+    expect(metrics.postsWithPainMatch).toBe(3);
+    expect(metrics.postsWithCompetitorMatch).toBe(3);
+    expect(metrics.intentMatchTerms).toBeGreaterThan(0);
+    expect(metrics.painMatchTerms).toBeGreaterThan(0);
+    expect(metrics.competitorMatchTerms).toBeGreaterThan(0);
+    expect(metrics.phase8Passed).toBe(3);
+    expect(metrics.phase8Failed).toBe(1);
+    expect(metrics.phase8IntentOrPain).toBe(3);
+    expect(metrics.queueInserted).toBe(1);
+    expect(metrics.queueDuplicateSkipped).toBe(1);
+    expect(metrics.queueInsertFailed).toBe(1);
+    expect(metrics.subreddits[0].matchingCandidates).toBe(3);
+    expect(metrics.subreddits[0].phase8Passed).toBe(3);
+    expect(metrics.subreddits[0].queueInserted).toBe(1);
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(3);
+
+    consoleErrorSpy.mockRestore();
   });
 });

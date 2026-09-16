@@ -1,5 +1,6 @@
 import "server-only";
 
+import { createScanMetrics } from "@/lib/scans/scan-metrics";
 import { runGeminiQualificationWorker } from "@/services/gemini-qualification-worker";
 import { RedditScanMatchingHandler } from "@/services/reddit-scan-matching-handler";
 import { scanProjectReddit } from "@/services/reddit-scanner";
@@ -28,20 +29,28 @@ export async function runProjectScan(input: {
   syncLogId: string;
 }): Promise<void> {
   const { userId, projectId, syncLogId } = input;
+  const metrics = createScanMetrics(projectId, syncLogId);
+  const totalStartedMs = Date.now();
 
   try {
-    await scanProjectReddit(userId, projectId, new RedditScanMatchingHandler(userId));
-    await runGeminiQualificationWorker({ projectId });
+    await scanProjectReddit(userId, projectId, new RedditScanMatchingHandler(userId, metrics), {
+      metrics,
+    });
+    const summary = await runGeminiQualificationWorker({ projectId, metrics });
+    metrics.qualified = summary.qualified;
 
     const log = await getScanById(userId, syncLogId);
     const since = log?.startedAt ?? new Date(0).toISOString();
     const leadsFound = await countLeadsCreatedSince(userId, projectId, since);
+    metrics.leadsFound = leadsFound;
+    metrics.durationsMs.total = Date.now() - totalStartedMs;
 
-    await markScanSuccess(syncLogId, leadsFound);
+    await markScanSuccess(syncLogId, leadsFound, metrics);
   } catch (error) {
     const message = toSafeScanErrorMessage(error);
+    metrics.durationsMs.total = Date.now() - totalStartedMs;
     try {
-      await markScanFailed(syncLogId, message);
+      await markScanFailed(syncLogId, message, metrics);
     } catch (markError) {
       console.error("[scan-orchestrator] Failed to mark scan failed:", markError);
     }

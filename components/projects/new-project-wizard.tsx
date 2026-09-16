@@ -12,6 +12,7 @@ import { ProjectSavedDialog } from "@/components/projects/project-saved-dialog";
 import { AuthMessage } from "@/components/shared/auth/auth-message";
 import { BusinessDescriptionField } from "@/components/projects/business-description-field";
 import { EditableListField } from "@/components/projects/editable-list-field";
+import { isCompletedScanReadyToNavigate } from "@/lib/scans/dashboard-navigation";
 import { SCAN_POLL_INTERVAL_MS } from "@/lib/scans/scan-progress";
 import { Button } from "@/components/ui/button";
 import type { ScanProgressStage } from "@/types/sync-logs";
@@ -132,10 +133,16 @@ export function NewProjectWizard() {
     }
 
     let cancelled = false;
+    // See `isCompletedScanReadyToNavigate` - stops a redundant "completed"
+    // poll (already in flight, or from an interval tick that fires before
+    // this effect is cleaned up) from repeating the dashboard navigation.
+    let hasNavigated = false;
 
     async function pollStatus() {
+      if (cancelled || hasNavigated) return;
+
       const result = await getProjectScanStatusAction(savedProjectId!);
-      if (cancelled) return;
+      if (cancelled || hasNavigated) return;
 
       if (!result.ok) {
         setScanStage("failed");
@@ -146,9 +153,30 @@ export function NewProjectWizard() {
       setScanStage(result.data.stage);
       setScanError(result.data.errorMessage);
 
-      if (result.data.stage === "completed" && result.data.dashboardPath) {
+      if (result.data.stage === "completed") {
+        // Close the scanning/loading dialog immediately once the backend
+        // reports completion - do not wait for navigation to unmount this
+        // component. This is independent of `leadsFound`/lead count, and
+        // independent of the one-shot navigation guard below: repeating
+        // this on a redundant poll is a harmless no-op.
+        setShowFindingDialog(false);
+      }
+
+      if (
+        isCompletedScanReadyToNavigate(result.data.stage, result.data.dashboardPath, hasNavigated)
+      ) {
+        hasNavigated = true;
+        // Stop polling synchronously now instead of only relying on this
+        // effect's cleanup (which runs on React's next render and can be
+        // outraced by the next interval tick) - this is what previously
+        // allowed a second "completed" poll to repeat the navigation.
+        window.clearInterval(interval);
+        // A single router.push() is enough: the dashboard route is fully
+        // dynamic (auth + fresh Supabase reads), so it never needs an
+        // immediate router.refresh() here - calling both back-to-back
+        // raced the refresh (of this still-current /projects/new route)
+        // against the push, which could leave the app on /projects/new.
         router.push(result.data.dashboardPath);
-        router.refresh();
       }
     }
 

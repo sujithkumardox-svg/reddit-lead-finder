@@ -56,8 +56,9 @@ export type RedditLeadRow = {
    * shown via a tooltip/interaction on the Possible Competitor badge.
    */
   aiPossibleCompetitorReason: string | null;
-  safetyBadge: SubredditSafetyBadge;
-  safetyExplanation: string;
+  /** Null while Safety Badges are deferred from the MVP persist path. */
+  safetyBadge: SubredditSafetyBadge | null;
+  safetyExplanation: string | null;
   status: RedditLeadStatus;
   createdAt: string;
   updatedAt: string;
@@ -117,6 +118,7 @@ export type PersistQualifiedLeadInput = {
   aiMatchReason: string;
   aiPossibleCompetitor: string | null;
   aiPossibleCompetitorReason: string | null;
-  safetyBadge: SubredditSafetyBadge;
-  safetyExplanation: string;
+  /** Omitted or null while Safety Badges are deferred from the MVP persist path. */
+  safetyBadge?: SubredditSafetyBadge | null;
+  safetyExplanation?: string | null;
 };

@@ -27,12 +27,9 @@ vi.mock("@/lib/ai/qualify-reddit-candidate", () => ({
   qualifyRedditCandidate: vi.fn(),
 }));
 
-// Phase 10: `lib/safety/subreddit-safety.ts` calls Reddit's API (via
-// `lib/reddit/reddit-rules.ts`), and `services/reddit-leads.ts` talks to
-// Supabase - neither runs in a plain unit test. Mocking them here keeps
-// these tests focused on the worker's Phase 10 wiring (qualify -> safety
-// lookup -> persist), not the classifier or DAL internals, which are
-// already covered by `subreddit-safety.test.ts` and `reddit-leads.test.ts`.
+// Safety lookup is deferred from the MVP persist path. The mock stays so
+// tests can prove `getSubredditSafety` is never called. `reddit-leads` is
+// mocked because it talks to Supabase.
 vi.mock("@/lib/safety/subreddit-safety", () => ({
   getSubredditSafety: vi.fn(),
 }));
@@ -44,6 +41,7 @@ vi.mock("@/services/reddit-leads", () => ({
 import { qualifyRedditCandidate } from "@/lib/ai/qualify-reddit-candidate";
 import type { QualifyRedditCandidateResult } from "@/lib/ai/qualify-reddit-candidate";
 import { getSubredditSafety } from "@/lib/safety/subreddit-safety";
+import { createScanMetrics } from "@/lib/scans/scan-metrics";
 import {
   claimNextPending,
   markFailed,
@@ -60,7 +58,6 @@ import { getProjectById } from "@/services/projects";
 import { persistQualifiedLead } from "@/services/reddit-leads";
 import type { GeminiQualificationQueueRow } from "@/types/gemini-qualification-queue";
 import type { Project } from "@/types/project";
-import type { SubredditSafetyResult } from "@/types/reddit-leads";
 
 const mockedClaimNextPending = vi.mocked(claimNextPending);
 const mockedMarkFailed = vi.mocked(markFailed);
@@ -72,14 +69,6 @@ const mockedGetProjectById = vi.mocked(getProjectById);
 const mockedQualifyRedditCandidate = vi.mocked(qualifyRedditCandidate);
 const mockedGetSubredditSafety = vi.mocked(getSubredditSafety);
 const mockedPersistQualifiedLead = vi.mocked(persistQualifiedLead);
-
-function makeSafetyResult(overrides: Partial<SubredditSafetyResult> = {}): SubredditSafetyResult {
-  return {
-    badge: "without_rules",
-    explanation: "This subreddit has no posted rules.",
-    ...overrides,
-  };
-}
 
 function makeQueueRow(
   overrides: Partial<GeminiQualificationQueueRow> = {},
@@ -168,10 +157,6 @@ function makeQualifyResult(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Phase 10 defaults: most existing tests don't care about the safety
-  // lookup/persistence step, so give it a harmless default here and let
-  // individual Phase 10 tests override with their own mockResolvedValueOnce.
-  mockedGetSubredditSafety.mockResolvedValue(makeSafetyResult());
   mockedPersistQualifiedLead.mockResolvedValue(undefined);
   mockedRecordGeminiResult.mockResolvedValue(undefined);
   mockedMarkGeminiCallAttempted.mockResolvedValue(undefined);
@@ -364,7 +349,19 @@ describe("runGeminiQualificationWorker - batch behavior", () => {
 
     expect(mockedRecoverStaleProcessing).toHaveBeenCalledTimes(1);
     expect(mockedClaimNextPending).toHaveBeenCalledTimes(4);
-    expect(summary).toEqual({ processed: 2, qualified: 1, failed: 1 });
+    expect(summary).toEqual({
+      processed: 2,
+      qualified: 1,
+      failed: 1,
+      geminiCallsPerformed: 3,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 1,
+      strong8to10: 1,
+      partial6to7: 0,
+      notQualified0to5: 1,
+      leadsPersisted: 1,
+      persistFailed: 0,
+    });
   });
 
   it("6b. stops once maxCandidates is reached even if more candidates remain pending", async () => {
@@ -379,7 +376,19 @@ describe("runGeminiQualificationWorker - batch behavior", () => {
     const summary = await runGeminiQualificationWorker(2);
 
     expect(mockedClaimNextPending).toHaveBeenCalledTimes(2);
-    expect(summary).toEqual({ processed: 2, qualified: 2, failed: 0 });
+    expect(summary).toEqual({
+      processed: 2,
+      qualified: 2,
+      failed: 0,
+      geminiCallsPerformed: 2,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 0,
+      strong8to10: 2,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 2,
+      persistFailed: 0,
+    });
   });
 
   it("6c. exits immediately with a zero summary when the queue starts empty", async () => {
@@ -388,24 +397,34 @@ describe("runGeminiQualificationWorker - batch behavior", () => {
 
     const summary = await runGeminiQualificationWorker();
 
-    expect(summary).toEqual({ processed: 0, qualified: 0, failed: 0 });
+    expect(summary).toEqual({
+      processed: 0,
+      qualified: 0,
+      failed: 0,
+      geminiCallsPerformed: 0,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 0,
+      strong8to10: 0,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 0,
+      persistFailed: 0,
+    });
   });
 });
 
 describe("processNextGeminiQualificationCandidate - Phase 10 qualified-lead persistence", () => {
-  it("7. looks up subreddit safety and persists the lead when aiQualified is true", async () => {
+  it("7. persists the lead when aiQualified is true without looking up subreddit safety", async () => {
     const claimedRow = makeQueueRow({ subreddit: "SaaS" });
     mockedClaimNextPending.mockResolvedValueOnce(claimedRow);
     mockedGetProjectById.mockResolvedValueOnce(makeProject());
     const result = makeQualifyResult({ aiQualified: true });
     mockedQualifyRedditCandidate.mockResolvedValueOnce(result);
     mockedSaveQualificationResult.mockResolvedValueOnce(undefined);
-    const safety = makeSafetyResult({ badge: "promo_conditional", explanation: "Allowed with mod approval." });
-    mockedGetSubredditSafety.mockResolvedValueOnce(safety);
 
     const outcome = await processNextGeminiQualificationCandidate();
 
-    expect(mockedGetSubredditSafety).toHaveBeenCalledWith("SaaS", expect.any(Map));
+    expect(mockedGetSubredditSafety).not.toHaveBeenCalled();
     expect(mockedPersistQualifiedLead.mock.invocationCallOrder[0]).toBeLessThan(
       mockedSaveQualificationResult.mock.invocationCallOrder[0],
     );
@@ -428,10 +447,11 @@ describe("processNextGeminiQualificationCandidate - Phase 10 qualified-lead pers
         aiMatchReason: result.aiMatchReason,
         aiPossibleCompetitor: result.aiPossibleCompetitor,
         aiPossibleCompetitorReason: result.aiPossibleCompetitorReason,
-        safetyBadge: safety.badge,
-        safetyExplanation: safety.explanation,
       }),
     );
+    const persistPayload = mockedPersistQualifiedLead.mock.calls[0][0];
+    expect(persistPayload).not.toHaveProperty("safetyBadge");
+    expect(persistPayload).not.toHaveProperty("safetyExplanation");
     expect(outcome).toEqual({ outcome: "processed", queueId: claimedRow.id, aiQualified: true });
   });
 
@@ -450,28 +470,23 @@ describe("processNextGeminiQualificationCandidate - Phase 10 qualified-lead pers
     expect(outcome).toEqual({ outcome: "processed", queueId: claimedRow.id, aiQualified: false });
   });
 
-  it("9. does not mark the queue row completed when the safety lookup throws", async () => {
+  it("9. still persists a qualified lead when getSubredditSafety would have failed", async () => {
     const claimedRow = makeQueueRow();
     mockedClaimNextPending.mockResolvedValueOnce(claimedRow);
     mockedGetProjectById.mockResolvedValueOnce(makeProject());
     const result = makeQualifyResult({ aiQualified: true });
     mockedQualifyRedditCandidate.mockResolvedValueOnce(result);
     mockedGetSubredditSafety.mockRejectedValueOnce(new Error("Reddit API request failed"));
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mockedSaveQualificationResult.mockResolvedValueOnce(undefined);
 
     const outcome = await processNextGeminiQualificationCandidate();
 
+    expect(mockedGetSubredditSafety).not.toHaveBeenCalled();
     expect(mockedRecordGeminiResult).toHaveBeenCalledWith(claimedRow.id, result);
-    expect(mockedSaveQualificationResult).not.toHaveBeenCalled();
-    expect(mockedMarkFailed).toHaveBeenCalledWith(claimedRow.id, "Reddit API request failed");
-    expect(mockedPersistQualifiedLead).not.toHaveBeenCalled();
-    expect(outcome).toEqual({
-      outcome: "failed",
-      queueId: claimedRow.id,
-      error: "Reddit API request failed",
-    });
-
-    consoleErrorSpy.mockRestore();
+    expect(mockedPersistQualifiedLead).toHaveBeenCalledTimes(1);
+    expect(mockedSaveQualificationResult).toHaveBeenCalledWith(claimedRow.id, result);
+    expect(mockedMarkFailed).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ outcome: "processed", queueId: claimedRow.id, aiQualified: true });
   });
 
   it("10. does not mark the queue row completed when persisting the lead throws; retry remains an upsert", async () => {
@@ -524,8 +539,8 @@ describe("processNextGeminiQualificationCandidate - Phase 10 qualified-lead pers
   });
 });
 
-describe("runGeminiQualificationWorker - Phase 10 per-run subreddit safety cache", () => {
-  it("11. shares one safety cache across every candidate processed in the same run", async () => {
+describe("runGeminiQualificationWorker - deferred subreddit safety", () => {
+  it("11. never looks up subreddit safety while draining the queue", async () => {
     const rows = [
       makeQueueRow({ id: "queue-1", subreddit: "SaaS" }),
       makeQueueRow({ id: "queue-2", subreddit: "SaaS" }),
@@ -541,16 +556,8 @@ describe("runGeminiQualificationWorker - Phase 10 per-run subreddit safety cache
 
     await runGeminiQualificationWorker();
 
-    expect(mockedGetSubredditSafety).toHaveBeenCalledTimes(2);
-    const [firstCallCache] = mockedGetSubredditSafety.mock.calls[0];
-    const [, firstCacheArg] = mockedGetSubredditSafety.mock.calls[0];
-    const [, secondCacheArg] = mockedGetSubredditSafety.mock.calls[1];
-    expect(firstCallCache).toBe("SaaS");
-    // Both calls received the exact same Map instance - the whole point of
-    // the run-scoped cache (actual reuse behavior is covered by
-    // subreddit-safety.test.ts; this only proves the worker shares one
-    // cache object across the run).
-    expect(firstCacheArg).toBe(secondCacheArg);
+    expect(mockedGetSubredditSafety).not.toHaveBeenCalled();
+    expect(mockedPersistQualifiedLead).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -883,5 +890,51 @@ describe("project-scoped worker claiming", () => {
 
     expect(mockedRecoverStaleProcessing).toHaveBeenCalledWith(undefined, undefined);
     expect(mockedClaimNextPending).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("runGeminiQualificationWorker - forensic metrics summary", () => {
+  it("records score buckets, persist failure, and duplicate Gemini skips on the shared accumulator", async () => {
+    const metrics = createScanMetrics("project-1", "sync-1");
+    mockedRecoverStaleProcessing.mockResolvedValueOnce(0);
+    mockedClaimNextPending
+      .mockResolvedValueOnce(
+        makeQueueRow({
+          id: "queue-dup",
+          aiQualified: true,
+          aiScore: 7,
+          aiMatchType: "intent",
+          aiLeadSummary: "Summary",
+          aiMatchReason: "Reason",
+          aiProvider: "google",
+          aiModel: "gemini-3.5-flash",
+        }),
+      )
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-persist-fail" }))
+      .mockResolvedValueOnce(null);
+    mockedGetProjectById.mockResolvedValue(makeProject());
+    mockedQualifyRedditCandidate.mockResolvedValue(makeQualifyResult({ aiQualified: true, aiScore: 9 }));
+    mockedPersistQualifiedLead
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("Failed to persist qualified lead."));
+    mockedSaveQualificationResult.mockResolvedValue(undefined);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const summary = await runGeminiQualificationWorker({ projectId: "project-1", metrics });
+
+    expect(summary.processed).toBe(1);
+    expect(summary.failed).toBe(1);
+    expect(summary.geminiDuplicateSkips).toBe(1);
+    expect(summary.geminiCallsPerformed).toBe(1);
+    expect(summary.partial6to7).toBe(1);
+    expect(summary.strong8to10).toBe(1);
+    expect(summary.leadsPersisted).toBe(1);
+    expect(summary.persistFailed).toBe(1);
+    expect(summary.geminiErrors).toBe(0);
+    expect(metrics.geminiDuplicateSkips).toBe(1);
+    expect(metrics.persistFailed).toBe(1);
+    expect(mockedQualifyRedditCandidate).toHaveBeenCalledTimes(1);
+
+    consoleErrorSpy.mockRestore();
   });
 });
