@@ -154,7 +154,18 @@ function buildResultFromRecordedCandidate(
   };
 }
 
-/** Builds the Phase 10 `persistQualifiedLead` input from a claimed queue row and its Gemini result. */
+/**
+ * Builds the Phase 10 `persistQualifiedLead` input from a claimed queue row
+ * and its Gemini result. Only ever called (via `persistQualifiedLeadOrThrow`)
+ * when `result.aiQualified === true` - which, per Phase 9's score-first
+ * gating (`lib/ai/qualify-reddit-candidate.ts`), is only possible when
+ * `aiScore >= 6`, the exact condition under which enrichment was generated.
+ * `aiLeadSummary`/`aiMatchReason` are therefore guaranteed non-null on this
+ * path even though `QualifyRedditCandidateResult` types them as
+ * `string | null` to also cover the score `< 6` (no-enrichment) case this
+ * function is never reached for. The two non-null assertions below reflect
+ * that guarantee to the type checker; they assert no new runtime behavior.
+ */
 function buildPersistLeadInput(
   candidate: GeminiQualificationQueueRow,
   result: QualifyRedditCandidateResult,
@@ -176,8 +187,8 @@ function buildPersistLeadInput(
     itemCreatedAt: candidate.itemCreatedAt,
     aiScore: result.aiScore,
     aiMatchType: result.aiMatchType,
-    aiLeadSummary: result.aiLeadSummary,
-    aiMatchReason: result.aiMatchReason,
+    aiLeadSummary: result.aiLeadSummary!,
+    aiMatchReason: result.aiMatchReason!,
     aiPossibleCompetitor: result.aiPossibleCompetitor,
     aiPossibleCompetitorReason: result.aiPossibleCompetitorReason,
   };
