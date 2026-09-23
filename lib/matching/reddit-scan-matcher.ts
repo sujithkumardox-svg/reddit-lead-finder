@@ -1,6 +1,19 @@
 import { runMatchingEngine } from "@/lib/matching/matching-engine";
 import type { MatchingEngineResult, OnboardingSearchTerms } from "@/lib/matching/matching-engine";
+import { combineRedditPostText } from "@/lib/reddit/combine-reddit-post-text";
 import type { RedditCommentItem, RedditPostItem, RedditScanResult } from "@/types/reddit-scan";
+
+/**
+ * Re-exported so every existing import of `combineRedditPostText` from
+ * this module (this file's own matching logic below, plus
+ * `lib/matching/reddit-scan-matcher.test.ts`) keeps working unchanged.
+ * The canonical implementation now lives in
+ * `lib/reddit/combine-reddit-post-text.ts` - a shared, non-legacy
+ * location the NEW Phase 7 lightweight AI relevance filter also depends
+ * on - so this OLD Phase 7 matcher file can eventually be deleted without
+ * taking that helper down with it. Behavior is completely unchanged.
+ */
+export { combineRedditPostText };
 
 /**
  * Pure Scanner -> Matching Engine adapter logic (no I/O, no database, no
@@ -46,17 +59,6 @@ export type RedditScanMatchingResult = {
   posts: MatchedRedditPost[];
   comments: MatchedRedditComment[];
 };
-
-/**
- * Combines a Reddit post's title and body into the single text string the
- * Matching Engine evaluates. Never mutates `post`.
- *
- * Link posts (no selftext) have `body === ""` - in that case the combined
- * text is just the title, so no empty second paragraph is introduced.
- */
-export function combineRedditPostText(post: RedditPostItem): string {
-  return post.body ? `${post.title}\n\n${post.body}` : post.title;
-}
 
 /**
  * Runs the Matching Engine over every post and comment in one Reddit scan

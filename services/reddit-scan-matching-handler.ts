@@ -1,82 +1,57 @@
 import "server-only";
 
-import { evaluateGeminiEligibility } from "@/lib/matching/gemini-eligibility";
-import type { GeminiEligibilityResult, QualificationReason } from "@/lib/matching/gemini-eligibility";
-import type { MatchingEngineResult, OnboardingSearchTerms } from "@/lib/matching/matching-engine";
-import { matchRedditScanResult } from "@/lib/matching/reddit-scan-matcher";
-import type {
-  MatchedRedditPost,
-  RedditScanMatchingResult,
-} from "@/lib/matching/reddit-scan-matcher";
-import { findSubredditMetrics, hasAnyMatchCategory } from "@/lib/scans/scan-metrics";
-import { enqueueCandidate } from "@/services/gemini-qualification-queue";
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
-import type { EnqueueGeminiCandidateInput, GeminiQueueQualificationReason } from "@/types/gemini-qualification-queue";
+import { runPhase7RelevanceFilter } from "@/services/reddit-phase7-relevance-filter";
+import type { Phase7ProjectContext } from "@/services/reddit-phase7-relevance-filter";
 import type { RedditScanResult, RedditScanResultHandler } from "@/types/reddit-scan";
-import type { ScanRunMetrics, ScanSubredditMetrics } from "@/types/scan-metrics";
+import type { ScanRunMetrics } from "@/types/scan-metrics";
 
 /**
- * The pending Scanner -> Matching Engine connection.
+ * The Scanner -> NEW Phase 7 connection.
  *
  * The Reddit Scanner (`services/reddit-scanner.ts`) stays independent of
- * the Matching Engine (`lib/matching/matching-engine.ts`) - it never
- * imports or calls `runMatchingEngine` directly. Instead it only knows
- * about the `RedditScanResultHandler` contract (`types/reddit-scan.ts`).
+ * NEW Phase 7 (`services/reddit-phase7-relevance-filter.ts`) - it never
+ * imports or calls it directly. Instead it only knows about the
+ * `RedditScanResultHandler` contract (`types/reddit-scan.ts`).
  * `RedditScanMatchingHandler` is the minimal adapter that implements that
  * contract and wires the two together:
  *
  *   1. `scanProjectReddit` calls `handleScanResult(result)` once the scan
  *      completes.
- *   2. This handler loads the project's onboarding terms itself, via the
+ *   2. This handler loads the project's business context itself, via the
  *      existing `getProjectScanData` (`services/projects.ts`) - the
- *      handler contract only carries scanned Reddit content, not terms, so
- *      they're loaded here rather than threaded through the contract.
- *   3. Those terms are mapped onto the Matching Engine's
- *      `OnboardingSearchTerms` shape (`mapProjectScanDataToOnboardingTerms`
- *      below), in the locked conceptual order: keywords, intent phrases,
- *      pain phrases, competitors, hidden keyword variations. That order
- *      only affects mapping/readability - it does not lower hidden keyword
- *      variations' matching importance (the Matching Engine treats every
- *      category as independently and fully as documented in
- *      `matching-engine.ts`).
- *   4. Every post (title + body combined) and every comment (body alone)
- *      is matched via `matchRedditScanResult`
- *      (`lib/matching/reddit-scan-matcher.ts`). New scans are posts-only
- *      (`comments: []`); comment matching remains for historical result
- *      shapes only.
- *   5. Every matched post is run through Phase 8's
- *      `evaluateGeminiEligibility` (`lib/matching/gemini-eligibility.ts`).
- *      Post candidates with `qualifiesForGemini: true` are immediately persisted
- *      to the `gemini_qualification_queue` database table via
- *      `enqueueCandidate` (`services/gemini-qualification-queue.ts`) -
- *      BEFORE any future Gemini processing - so a crash after this point
- *      can never lose a qualifying candidate. Comments are not enqueued.
- *      Non-qualifying posts are never enqueued. This handler never talks
- *      to Supabase directly for the queue; all persistence goes through
- *      that dedicated service. A genuine DB insertion error for one
- *      candidate is caught and logged (not retried) rather than aborting
- *      the rest of the scan's candidates - see `safelyEnqueueCandidate`
- *      below.
+ *      handler contract only carries scanned Reddit content, not project
+ *      context, so it's loaded here rather than threaded through the
+ *      contract.
+ *   3. Every scanned POST is run through NEW Phase 7
+ *      (`runPhase7RelevanceFilter`): a lightweight AI relevance filter
+ *      that decides `LEAD` or `NOT_A_LEAD` directly from the raw post
+ *      (title+body combined) and the project's business context - no
+ *      keyword matching or keyword scoring runs in this live path
+ *      anymore. `LEAD` posts are hand off into the EXISTING Phase 9
+ *      `enqueueCandidate()` queue by that module; `NOT_A_LEAD` posts stop
+ *      there and are never sent to Phase 9. Comments are never passed to
+ *      Phase 7 (Reddit comment scanning is out of scope - new scans are
+ *      posts-only, `result.comments` is always `[]`).
  *
- * `scanProjectReddit`'s return type (`Promise<RedditScanResult>`) is left
- * untouched - the collected Matching Engine results are exposed
- * separately, via `getMatchingResult()`, after the scan completes:
- *
- * ```ts
- * const handler = new RedditScanMatchingHandler(userId);
- * const scanResult = await scanProjectReddit(userId, projectId, handler);
- * const matchingResult = handler.getMatchingResult();
- * ```
+ * REPLACED HERE: this is the exact seam that used to run the OLD Phase 7
+ * keyword matcher (`lib/matching/reddit-scan-matcher.ts`) and OLD Phase 8
+ * keyword scoring (`lib/matching/gemini-eligibility.ts`) per post before
+ * enqueueing. Neither OLD module is deleted or modified - they remain
+ * fully intact (and independently tested) as a rollback/reference
+ * checkpoint; this handler simply no longer calls them, per the approved
+ * Phase 7 replacement plan. Legacy removal is a separate, later prompt.
  *
  * Deliberately out of scope here (see task spec): calling the Gemini API
- * (or any fallback AI provider), a Gemini worker/retry loop, persisting
- * anything to `reddit_leads` or the Leads UI, and scan scheduling.
+ * (or any AI provider) directly, a Phase 9 worker/retry loop, persisting
+ * anything to `reddit_leads` or the Leads UI, and scan scheduling - all of
+ * that already lives in Phase 9/10 and scan orchestration, untouched by
+ * this file.
  */
 export class RedditScanMatchingHandler implements RedditScanResultHandler {
   private readonly userId: string;
   private readonly metrics: ScanRunMetrics | undefined;
-  private matchingResult: RedditScanMatchingResult | null = null;
 
   constructor(userId: string, metrics?: ScanRunMetrics) {
     this.userId = userId;
@@ -89,241 +64,30 @@ export class RedditScanMatchingHandler implements RedditScanResultHandler {
       throw new Error("Project not found.");
     }
 
-    const terms = mapProjectScanDataToOnboardingTerms(scanData);
-    const matchingStartedMs = Date.now();
-    this.matchingResult = matchRedditScanResult(result, terms);
-    if (this.metrics) {
-      this.metrics.durationsMs.matching += Date.now() - matchingStartedMs;
-      recordMatchingMetrics(this.metrics, this.matchingResult);
-    }
-
-    await enqueueGeminiEligibleCandidates(
+    await runPhase7RelevanceFilter(
       this.userId,
       result.projectId,
-      this.matchingResult,
+      buildPhase7ProjectContext(scanData),
+      result.posts,
       this.metrics,
     );
-  }
-
-  /**
-   * Every post's and comment's Matching Engine result from the most
-   * recently handled scan. `null` until `handleScanResult` has run at
-   * least once.
-   */
-  getMatchingResult(): RedditScanMatchingResult | null {
-    return this.matchingResult;
   }
 }
 
 /**
  * Maps a project's onboarding search data (`ProjectScanData`, from
- * `getProjectScanData`) onto the Matching Engine's `OnboardingSearchTerms`
- * shape. `hiddenKeywords` (the Scanner/DB name) becomes
- * `hiddenKeywordVariations` (the Matching Engine's name) - every other
- * category is a direct, unmodified pass-through of the same array.
+ * `getProjectScanData`) onto NEW Phase 7's business-context shape
+ * (`Phase7ProjectContext`). Field names are an unmodified pass-through of
+ * the project's existing, established fields - nothing is renamed or
+ * reinterpreted. `hiddenKeywords`/`subreddits`/`isActive`/`id` are not
+ * part of Phase 7's business context and are simply not carried over.
  */
-export function mapProjectScanDataToOnboardingTerms(scanData: ProjectScanData): OnboardingSearchTerms {
+export function buildPhase7ProjectContext(scanData: ProjectScanData): Phase7ProjectContext {
   return {
+    description: scanData.description,
     keywords: scanData.keywords,
     intentPhrases: scanData.intentPhrases,
     painPhrases: scanData.painPhrases,
     competitors: scanData.competitors,
-    hiddenKeywordVariations: scanData.hiddenKeywords,
-  };
-}
-
-function recordMatchingMetrics(
-  metrics: ScanRunMetrics,
-  matchingResult: RedditScanMatchingResult,
-): void {
-  const keywordTerms = new Set<string>();
-  const competitorTerms = new Set<string>();
-  const hiddenTerms = new Set<string>();
-  const intentTerms = new Set<string>();
-  const painTerms = new Set<string>();
-
-  metrics.postsEnteringMatching += matchingResult.posts.length;
-
-  for (const matchedPost of matchingResult.posts) {
-    const result = matchedPost.result;
-    const bucket = findSubredditMetrics(metrics, matchedPost.post.subreddit);
-
-    if (result.keywords.length > 0) {
-      metrics.postsWithKeywordMatch++;
-      addMatchedTerms(keywordTerms, result.keywords);
-    }
-    if (result.competitors.length > 0) {
-      metrics.postsWithCompetitorMatch++;
-      addMatchedTerms(competitorTerms, result.competitors);
-    }
-    if (result.hiddenKeywordVariations.length > 0) {
-      metrics.postsWithHiddenMatch++;
-      addMatchedTerms(hiddenTerms, result.hiddenKeywordVariations);
-    }
-    if (result.intentPhrases.length > 0) {
-      metrics.postsWithIntentMatch++;
-      addMatchedTerms(intentTerms, result.intentPhrases);
-    }
-    if (result.painPhrases.length > 0) {
-      metrics.postsWithPainMatch++;
-      addMatchedTerms(painTerms, result.painPhrases);
-    }
-
-    if (hasAnyMatchCategory(result)) {
-      metrics.matchingCandidates++;
-      if (bucket) {
-        bucket.matchingCandidates++;
-      }
-    }
-  }
-
-  metrics.keywordMatchTerms += keywordTerms.size;
-  metrics.competitorMatchTerms += competitorTerms.size;
-  metrics.hiddenMatchTerms += hiddenTerms.size;
-  metrics.intentMatchTerms += intentTerms.size;
-  metrics.painMatchTerms += painTerms.size;
-}
-
-function addMatchedTerms(into: Set<string>, matches: MatchingEngineResult["keywords"]): void {
-  for (const match of matches) {
-    into.add(match.term);
-  }
-}
-
-/**
- * Runs Phase 8 eligibility over every matched post and persists the
- * Gemini-eligible ones to the database queue. Comments are not enqueued.
- * Each candidate is enqueued independently via `safelyEnqueueCandidate` -
- * one candidate failing to persist never stops the rest from being
- * evaluated/queued, since a scan should surface as many crash-safe
- * candidates as possible.
- */
-async function enqueueGeminiEligibleCandidates(
-  userId: string,
-  projectId: string,
-  matchingResult: RedditScanMatchingResult,
-  metrics?: ScanRunMetrics,
-): Promise<void> {
-  for (const matchedPost of matchingResult.posts) {
-    const bucket = metrics ? findSubredditMetrics(metrics, matchedPost.post.subreddit) : undefined;
-    const phase8StartedMs = Date.now();
-    const eligibility = evaluateGeminiEligibility(matchedPost.result);
-    if (metrics) {
-      metrics.durationsMs.phase8 += Date.now() - phase8StartedMs;
-      recordPhase8Metrics(metrics, eligibility, bucket);
-    }
-    if (!eligibility.qualifiesForGemini) {
-      continue;
-    }
-    await safelyEnqueueCandidate(
-      buildPostCandidateInput(userId, projectId, matchedPost, eligibility),
-      metrics,
-      bucket,
-    );
-  }
-}
-
-function recordPhase8Metrics(
-  metrics: ScanRunMetrics,
-  eligibility: GeminiEligibilityResult,
-  bucket: ScanSubredditMetrics | undefined,
-): void {
-  if (!eligibility.qualifiesForGemini) {
-    metrics.phase8Failed++;
-    return;
-  }
-
-  metrics.phase8Passed++;
-  if (bucket) {
-    bucket.phase8Passed++;
-  }
-  if (eligibility.qualificationReason === "intent_or_pain") {
-    metrics.phase8IntentOrPain++;
-  }
-  if (eligibility.qualificationReason === "score_threshold") {
-    metrics.phase8ScoreThreshold++;
-  }
-}
-
-/**
- * Calls `enqueueCandidate` and swallows any error it throws, logging it
- * instead. `enqueueCandidate` already treats a duplicate (Postgres `23505`)
- * as an expected, non-throwing outcome on its own - that handling is
- * untouched and lives entirely in `services/gemini-qualification-queue.ts`.
- * This wrapper only guards against a *genuine* DB insertion error (e.g. a
- * connectivity or permissions failure), so that one candidate's failure
- * can never abort the rest of the scan's candidates. Never retried here -
- * a single attempt per candidate per scan.
- */
-async function safelyEnqueueCandidate(
-  input: EnqueueGeminiCandidateInput,
-  metrics?: ScanRunMetrics,
-  bucket?: ScanSubredditMetrics,
-): Promise<void> {
-  const queueStartedMs = Date.now();
-  try {
-    const row = await enqueueCandidate(input);
-    if (metrics) {
-      if (row) {
-        metrics.queueInserted++;
-        if (bucket) {
-          bucket.queueInserted++;
-        }
-      } else {
-        metrics.queueDuplicateSkipped++;
-      }
-    }
-  } catch (error) {
-    if (metrics) {
-      metrics.queueInsertFailed++;
-    }
-    console.error(
-      `[reddit-scan-matching-handler] Failed to queue Gemini candidate ${input.redditItemId} for project ${input.projectId}:`,
-      error,
-    );
-  } finally {
-    if (metrics) {
-      metrics.durationsMs.queue += Date.now() - queueStartedMs;
-    }
-  }
-}
-
-/** Only ever called for a candidate with `qualifiesForGemini: true`, so the reason can never be `"below_threshold"`. */
-function toQueueQualificationReason(reason: QualificationReason): GeminiQueueQualificationReason {
-  if (reason === "below_threshold") {
-    throw new Error("Cannot queue a candidate that did not qualify for Gemini.");
-  }
-  return reason;
-}
-
-function buildPostCandidateInput(
-  userId: string,
-  projectId: string,
-  matchedPost: MatchedRedditPost,
-  eligibility: GeminiEligibilityResult,
-): EnqueueGeminiCandidateInput {
-  const { post } = matchedPost;
-
-  return {
-    projectId,
-    userId,
-    redditItemId: post.id,
-    itemType: "post",
-    parentPostId: null,
-    subreddit: post.subreddit,
-    title: post.title,
-    body: post.body,
-    matchedText: matchedPost.text,
-    author: post.author,
-    authorId: post.authorId,
-    permalink: post.permalink,
-    redditScore: post.score,
-    numComments: post.numComments,
-    itemCreatedAt: post.createdAt,
-    matchedTerms: matchedPost.result,
-    numericalScore: eligibility.numericalScore,
-    diversityBonus: eligibility.diversityBonus,
-    finalScore: eligibility.finalScore,
-    qualificationReason: toQueueQualificationReason(eligibility.qualificationReason),
   };
 }

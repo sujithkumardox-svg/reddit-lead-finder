@@ -39,6 +39,13 @@ export function createScanMetrics(projectId: string, syncLogId: string): ScanRun
     phase8IntentOrPain: 0,
     phase8ScoreThreshold: 0,
 
+    postsEnteringPhase7: 0,
+    phase7Leads: 0,
+    phase7NotALead: 0,
+    phase7DedupSkipped: 0,
+    phase7ConcurrentSkipped: 0,
+    phase7Errors: 0,
+
     queueInserted: 0,
     queueDuplicateSkipped: 0,
     queueInsertFailed: 0,
@@ -66,6 +73,7 @@ export function createScanMetrics(projectId: string, syncLogId: string): ScanRun
       queue: 0,
       gemini: 0,
       persist: 0,
+      phase7: 0,
       total: 0,
     },
 

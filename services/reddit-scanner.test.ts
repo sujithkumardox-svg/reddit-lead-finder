@@ -40,6 +40,7 @@ function makeScanData(overrides: Partial<ProjectScanData> = {}): ProjectScanData
   return {
     id: "project-1",
     isActive: true,
+    description: "A Reddit lead-generation tool.",
     keywords: ["lead generation"],
     hiddenKeywords: ["reddit lead finder"],
     intentPhrases: ["looking for an alternative"],

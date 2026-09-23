@@ -1,42 +1,41 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RedditPostItem, RedditScanResult } from "@/types/reddit-scan";
+import type { RedditCommentItem, RedditPostItem, RedditScanResult } from "@/types/reddit-scan";
 
 // `services/projects.ts` talks to Supabase (via `server-only` + Next's
 // request-scoped `cookies()`), which doesn't exist in a plain unit test.
-// Mocking it here keeps this test focused on the adapter/handler logic -
+// Mocking it here keeps this test focused on the adapter/handler wiring -
 // it never exercises real Supabase access.
 vi.mock("@/services/projects", () => ({
   getProjectScanData: vi.fn(),
 }));
 
-// `services/gemini-qualification-queue.ts` talks to Supabase (via
-// `server-only`), which doesn't exist in a plain unit test. Mocking it here
-// keeps these tests focused on the handler's wiring - whether it calls
-// `enqueueCandidate` for qualifying candidates and skips non-qualifying
-// ones - without exercising real Supabase access.
-vi.mock("@/services/gemini-qualification-queue", () => ({
-  enqueueCandidate: vi.fn(),
+// NEW Phase 7 itself (claim -> AI call -> persist -> Phase 9 handoff) is
+// fully covered by `services/reddit-phase7-relevance-filter.test.ts`.
+// Mocking it here keeps this test focused on exactly one thing: does the
+// handler load the project's business context correctly and hand the
+// scanned posts to NEW Phase 7 at the right seam?
+vi.mock("@/services/reddit-phase7-relevance-filter", () => ({
+  runPhase7RelevanceFilter: vi.fn(),
 }));
 
 import { getProjectScanData } from "@/services/projects";
 import type { ProjectScanData } from "@/services/projects";
-import { enqueueCandidate } from "@/services/gemini-qualification-queue";
+import { runPhase7RelevanceFilter } from "@/services/reddit-phase7-relevance-filter";
 import { createScanMetrics } from "@/lib/scans/scan-metrics";
 import {
   RedditScanMatchingHandler,
-  mapProjectScanDataToOnboardingTerms,
+  buildPhase7ProjectContext,
 } from "@/services/reddit-scan-matching-handler";
-import type { GeminiQualificationQueueRow } from "@/types/gemini-qualification-queue";
-import type { RedditCommentItem } from "@/types/reddit-scan";
 
 const mockedGetProjectScanData = vi.mocked(getProjectScanData);
-const mockedEnqueueCandidate = vi.mocked(enqueueCandidate);
+const mockedRunPhase7RelevanceFilter = vi.mocked(runPhase7RelevanceFilter);
 
 function makeScanData(overrides: Partial<ProjectScanData> = {}): ProjectScanData {
   return {
     id: "project-1",
     isActive: true,
+    description: "A Reddit lead-generation tool.",
     keywords: ["lead generation"],
     hiddenKeywords: ["reddit lead finder"],
     intentPhrases: ["looking for an alternative"],
@@ -94,31 +93,26 @@ function makeScanResult(overrides: Partial<RedditScanResult> = {}): RedditScanRe
 
 beforeEach(() => {
   mockedGetProjectScanData.mockReset();
-  mockedEnqueueCandidate.mockReset();
-  mockedEnqueueCandidate.mockResolvedValue(null);
+  mockedRunPhase7RelevanceFilter.mockReset();
+  mockedRunPhase7RelevanceFilter.mockResolvedValue(undefined);
 });
 
-describe("mapProjectScanDataToOnboardingTerms", () => {
-  it("maps all five onboarding categories, renaming hiddenKeywords to hiddenKeywordVariations", () => {
+describe("buildPhase7ProjectContext", () => {
+  it("maps the project's business context fields through unchanged, dropping hidden/internal-only fields", () => {
     const scanData = makeScanData();
 
-    expect(mapProjectScanDataToOnboardingTerms(scanData)).toEqual({
+    expect(buildPhase7ProjectContext(scanData)).toEqual({
+      description: "A Reddit lead-generation tool.",
       keywords: ["lead generation"],
       intentPhrases: ["looking for an alternative"],
       painPhrases: ["struggling to find leads"],
       competitors: ["Syften"],
-      hiddenKeywordVariations: ["reddit lead finder"],
     });
   });
 });
 
 describe("RedditScanMatchingHandler", () => {
-  it("returns null before handleScanResult has run", () => {
-    const handler = new RedditScanMatchingHandler("user-1");
-    expect(handler.getMatchingResult()).toBeNull();
-  });
-
-  it("loads the project's onboarding terms and matches every post/comment, exposing results via getMatchingResult()", async () => {
+  it("loads the project's business context and hands every scanned post to NEW Phase 7", async () => {
     mockedGetProjectScanData.mockResolvedValue(makeScanData());
 
     const handler = new RedditScanMatchingHandler("user-1");
@@ -128,14 +122,19 @@ describe("RedditScanMatchingHandler", () => {
     await handler.handleScanResult(scanResult);
 
     expect(mockedGetProjectScanData).toHaveBeenCalledWith("user-1", "project-1");
-
-    const matchingResult = handler.getMatchingResult();
-    expect(matchingResult).not.toBeNull();
-    expect(matchingResult!.posts).toHaveLength(1);
-    expect(matchingResult!.posts[0].text).toBe(
-      "Looking for an alternative to Syften\n\nWe are struggling to find leads.",
+    expect(mockedRunPhase7RelevanceFilter).toHaveBeenCalledWith(
+      "user-1",
+      "project-1",
+      {
+        description: "A Reddit lead-generation tool.",
+        keywords: ["lead generation"],
+        intentPhrases: ["looking for an alternative"],
+        painPhrases: ["struggling to find leads"],
+        competitors: ["Syften"],
+      },
+      [post],
+      undefined,
     );
-    expect(matchingResult!.posts[0].result.competitors.map((m) => m.term)).toContain("Syften");
   });
 
   it("throws if the project can no longer be found", async () => {
@@ -144,211 +143,46 @@ describe("RedditScanMatchingHandler", () => {
     const handler = new RedditScanMatchingHandler("user-1");
 
     await expect(handler.handleScanResult(makeScanResult())).rejects.toThrow("Project not found.");
+    expect(mockedRunPhase7RelevanceFilter).not.toHaveBeenCalled();
   });
 
-  it("enqueues a Gemini-eligible post (intent/pain match) into the database queue immediately after matching", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const post = makePost(); // title/body trigger an intent + pain + competitor match
-    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [] }));
-
-    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
-    expect(mockedEnqueueCandidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        projectId: "project-1",
-        userId: "user-1",
-        redditItemId: "t3_post1",
-        itemType: "post",
-        parentPostId: null,
-        title: "Looking for an alternative to Syften",
-        body: "We are struggling to find leads.",
-        qualificationReason: "intent_or_pain",
-        authorId: "t2_someuser",
-        numComments: 0,
-      }),
-    );
-  });
-
-  it("does not enqueue comment candidates even when comments are present in the scan result", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const comment = makeComment({ body: "Struggling to find leads for my SaaS." });
-    await handler.handleScanResult(makeScanResult({ posts: [], comments: [comment] }));
-
-    expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
-  });
-
-  it("still enqueues a Gemini-eligible post when comments are also present", async () => {
+  it("never passes scanned comments to NEW Phase 7 - only posts", async () => {
     mockedGetProjectScanData.mockResolvedValue(makeScanData());
 
     const handler = new RedditScanMatchingHandler("user-1");
     const post = makePost();
-    const comment = makeComment({ body: "Struggling to find leads for my SaaS." });
+    const comment = makeComment();
     await handler.handleScanResult(makeScanResult({ posts: [post], comments: [comment] }));
 
-    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
-    expect(mockedEnqueueCandidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        redditItemId: "t3_post1",
-        itemType: "post",
-      }),
-    );
+    expect(mockedRunPhase7RelevanceFilter).toHaveBeenCalledTimes(1);
+    const passedPosts = mockedRunPhase7RelevanceFilter.mock.calls[0][3];
+    expect(passedPosts).toEqual([post]);
   });
 
-  it("does not enqueue a post/comment that does not qualify for Gemini", async () => {
+  it("forwards the optional ScanRunMetrics accumulator through to NEW Phase 7 unchanged", async () => {
     mockedGetProjectScanData.mockResolvedValue(makeScanData());
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const post = makePost({ title: "Just chatting", body: "Nothing relevant here." });
-    const comment = makeComment({ body: "Nothing relevant here either." });
-    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [comment] }));
-
-    expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
-  });
-});
-
-describe("RedditScanMatchingHandler - Gemini queue insertion error handling", () => {
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    consoleErrorSpy.mockRestore();
-  });
-
-  it("1. still safely ignores a duplicate candidate (enqueueCandidate resolving null) without throwing or logging an error", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-    mockedEnqueueCandidate.mockResolvedValue(null); // mirrors the real 23505 duplicate outcome
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const post = makePost();
-    await expect(
-      handler.handleScanResult(makeScanResult({ posts: [post], comments: [] })),
-    ).resolves.toBeUndefined();
-
-    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
-
-  it("2. logs a genuine DB insertion error for a candidate", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-    const dbError = new Error("connection refused");
-    mockedEnqueueCandidate.mockRejectedValueOnce(dbError);
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const post = makePost();
-    await handler.handleScanResult(makeScanResult({ posts: [post], comments: [] }));
-
-    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("t3_post1"),
-      dbError,
-    );
-  });
-
-  it("3. still processes later candidates after an earlier one fails to enqueue", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-    mockedEnqueueCandidate
-      .mockRejectedValueOnce(new Error("connection refused"))
-      .mockResolvedValueOnce(null);
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const failingPost = makePost({ id: "t3_fails" });
-    const survivingPost = makePost({ id: "t3_survives" });
-    await handler.handleScanResult(
-      makeScanResult({ posts: [failingPost, survivingPost], comments: [] }),
-    );
-
-    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(2);
-    expect(mockedEnqueueCandidate).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ redditItemId: "t3_fails" }),
-    );
-    expect(mockedEnqueueCandidate).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ redditItemId: "t3_survives" }),
-    );
-  });
-
-  it("4. does not fail the scan/handler because one queue insertion errored", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-    mockedEnqueueCandidate.mockRejectedValueOnce(new Error("connection refused"));
-
-    const handler = new RedditScanMatchingHandler("user-1");
-    const post = makePost();
-    const scanResult = makeScanResult({ posts: [post], comments: [] });
-
-    await expect(handler.handleScanResult(scanResult)).resolves.toBeUndefined();
-
-    // Matching results collected earlier in the same call are unaffected -
-    // the queue failure isn't retried and doesn't corrupt/discard them.
-    expect(handler.getMatchingResult()).not.toBeNull();
-    expect(handler.getMatchingResult()!.posts).toHaveLength(1);
-  });
-});
-
-describe("RedditScanMatchingHandler - forensic metrics", () => {
-  it("records matching, Phase 8, and queue insert/duplicate/failure around existing paths", async () => {
-    mockedGetProjectScanData.mockResolvedValue(makeScanData());
-    mockedEnqueueCandidate
-      .mockResolvedValueOnce({ id: "queue-inserted" } as GeminiQualificationQueueRow)
-      .mockResolvedValueOnce(null)
-      .mockRejectedValueOnce(new Error("connection refused"));
-
     const metrics = createScanMetrics("project-1", "sync-1");
-    metrics.subreddits.push({
-      name: "SaaS",
-      status: "succeeded",
-      startedAt: "2026-08-01T00:00:00.000Z",
-      completedAt: "2026-08-01T00:01:00.000Z",
-      durationMs: 1000,
-      rawPosts: 3,
-      inWindowPosts: 3,
-      outOfWindowPosts: 0,
-      postsAfterDedupe: 3,
-      matchingCandidates: 0,
-      phase8Passed: 0,
-      queueInserted: 0,
-      qualifiedLeads: 0,
-    });
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const handler = new RedditScanMatchingHandler("user-1", metrics);
-    await handler.handleScanResult(
-      makeScanResult({
-        posts: [
-          makePost({ id: "t3_insert" }),
-          makePost({ id: "t3_dup" }),
-          makePost({ id: "t3_fail" }),
-          makePost({ id: "t3_nomatch", title: "Just chatting", body: "Nothing relevant here." }),
-        ],
-        comments: [],
-      }),
+    await handler.handleScanResult(makeScanResult({ posts: [makePost()], comments: [] }));
+
+    expect(mockedRunPhase7RelevanceFilter).toHaveBeenCalledWith(
+      "user-1",
+      "project-1",
+      expect.anything(),
+      expect.anything(),
+      metrics,
     );
+  });
 
-    expect(metrics.postsEnteringMatching).toBe(4);
-    expect(metrics.matchingCandidates).toBe(3);
-    expect(metrics.postsWithIntentMatch).toBe(3);
-    expect(metrics.postsWithPainMatch).toBe(3);
-    expect(metrics.postsWithCompetitorMatch).toBe(3);
-    expect(metrics.intentMatchTerms).toBeGreaterThan(0);
-    expect(metrics.painMatchTerms).toBeGreaterThan(0);
-    expect(metrics.competitorMatchTerms).toBeGreaterThan(0);
-    expect(metrics.phase8Passed).toBe(3);
-    expect(metrics.phase8Failed).toBe(1);
-    expect(metrics.phase8IntentOrPain).toBe(3);
-    expect(metrics.queueInserted).toBe(1);
-    expect(metrics.queueDuplicateSkipped).toBe(1);
-    expect(metrics.queueInsertFailed).toBe(1);
-    expect(metrics.subreddits[0].matchingCandidates).toBe(3);
-    expect(metrics.subreddits[0].phase8Passed).toBe(3);
-    expect(metrics.subreddits[0].queueInserted).toBe(1);
-    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(3);
+  it("propagates a NEW Phase 7 failure instead of silently swallowing it", async () => {
+    mockedGetProjectScanData.mockResolvedValue(makeScanData());
+    mockedRunPhase7RelevanceFilter.mockRejectedValueOnce(new Error("unexpected failure"));
 
-    consoleErrorSpy.mockRestore();
+    const handler = new RedditScanMatchingHandler("user-1");
+
+    await expect(
+      handler.handleScanResult(makeScanResult({ posts: [makePost()], comments: [] })),
+    ).rejects.toThrow("unexpected failure");
   });
 });

@@ -179,10 +179,18 @@ export async function getProjectById(
  * never expose. This - and the database - are the only places these fields
  * may live. Never pass the return value of this function to a client
  * component or a server action response.
+ *
+ * `description` was added for NEW Phase 7 (the lightweight AI relevance
+ * filter, `services/reddit-phase7-relevance-filter.ts`), which needs the
+ * project's business description - already an established, existing
+ * `projects.description` field (the same one `Project.description`
+ * exposes) - to judge a Reddit post's relevance. Reusing this existing
+ * field/name rather than introducing a second description concept.
  */
 export type ProjectScanData = {
   id: string;
   isActive: boolean;
+  description: string;
   keywords: string[];
   hiddenKeywords: string[];
   intentPhrases: string[];
@@ -192,9 +200,9 @@ export type ProjectScanData = {
 };
 
 /**
- * Loads everything the Reddit Scanner needs to search Reddit for a project:
- * its visible keywords plus the hidden keyword variations and hidden
- * subreddit list generated during AI onboarding.
+ * Loads everything the Reddit Scanner and NEW Phase 7 need for a project:
+ * its business description, visible keywords, hidden keyword variations,
+ * and hidden subreddit list generated during AI onboarding.
  */
 export async function getProjectScanData(
   userId: string,
@@ -205,7 +213,7 @@ export async function getProjectScanData(
   const { data, error } = await supabase
     .from("projects")
     .select(
-      "id, is_active, keywords, hidden_keywords, intent_phrases, pain_phrases, competitors, subreddits",
+      "id, is_active, description, keywords, hidden_keywords, intent_phrases, pain_phrases, competitors, subreddits",
     )
     .eq("user_id", userId)
     .eq("id", projectId)
@@ -228,6 +236,7 @@ export async function getProjectScanData(
   return {
     id: data.id as string,
     isActive: data.is_active as boolean,
+    description: (data.description as string | null) ?? "",
     keywords: (data.keywords as string[] | null) ?? [],
     hiddenKeywords: (data.hidden_keywords as string[] | null) ?? [],
     intentPhrases: (data.intent_phrases as string[] | null) ?? [],

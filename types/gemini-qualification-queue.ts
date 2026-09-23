@@ -49,12 +49,22 @@ export type GeminiQualificationQueueRow = {
   /** Reddit comment count. Posts only - always `null` for comments, which have no such metric. */
   numComments: number | null;
   itemCreatedAt: string;
-  /** Complete Phase 7 `MatchingEngineResult` for this candidate. */
-  matchedTerms: MatchingEngineResult;
-  numericalScore: number;
-  diversityBonus: number;
-  finalScore: number;
-  qualificationReason: GeminiQueueQualificationReason;
+  /**
+   * Complete OLD Phase 7 `MatchingEngineResult` for this candidate - only
+   * ever populated when OLD Phase 7/8 keyword matching enqueued it. `null`
+   * for a candidate enqueued by NEW Phase 7 (the lightweight AI relevance
+   * filter), which never runs keyword matching and must never fabricate a
+   * fake value here.
+   */
+  matchedTerms: MatchingEngineResult | null;
+  /** OLD Phase 8 keyword score. `null` for a candidate enqueued by NEW Phase 7 - see `matchedTerms`. */
+  numericalScore: number | null;
+  /** OLD Phase 8 diversity bonus. `null` for a candidate enqueued by NEW Phase 7 - see `matchedTerms`. */
+  diversityBonus: number | null;
+  /** OLD Phase 8 `numericalScore + diversityBonus`. `null` for a candidate enqueued by NEW Phase 7 - see `matchedTerms`. */
+  finalScore: number | null;
+  /** OLD Phase 8's reason this candidate qualified. `null` for a candidate enqueued by NEW Phase 7, whose lightweight AI verdict is the reason instead. */
+  qualificationReason: GeminiQueueQualificationReason | null;
   status: GeminiQueueStatus;
   processingStartedAt: string | null;
   attemptCount: number;
@@ -105,7 +115,15 @@ export type GeminiQualificationQueueRow = {
   updatedAt: string;
 };
 
-/** Everything `enqueueCandidate` needs to persist one Phase 8-qualified post or comment. */
+/**
+ * Everything `enqueueCandidate` needs to persist one qualifying post or
+ * comment - either an OLD Phase 8-qualified candidate (which supplies
+ * every OLD Phase 7/8 field below) or a NEW Phase 7 `LEAD` candidate
+ * (which omits them - see each field's comment on
+ * `GeminiQualificationQueueRow` above). Optional rather than required so
+ * NEW Phase 7 never has to fabricate a fake value just to satisfy this
+ * type.
+ */
 export type EnqueueGeminiCandidateInput = {
   projectId: string;
   userId: string;
@@ -122,9 +140,9 @@ export type EnqueueGeminiCandidateInput = {
   redditScore: number;
   numComments: number | null;
   itemCreatedAt: string;
-  matchedTerms: MatchingEngineResult;
-  numericalScore: number;
-  diversityBonus: number;
-  finalScore: number;
-  qualificationReason: GeminiQueueQualificationReason;
+  matchedTerms?: MatchingEngineResult | null;
+  numericalScore?: number | null;
+  diversityBonus?: number | null;
+  finalScore?: number | null;
+  qualificationReason?: GeminiQueueQualificationReason | null;
 };

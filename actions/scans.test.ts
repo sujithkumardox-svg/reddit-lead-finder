@@ -66,6 +66,7 @@ beforeEach(() => {
   mockedGetProjectScanData.mockResolvedValue({
     id: "project-1",
     isActive: true,
+    description: "A Reddit lead-generation tool.",
     keywords: [],
     hiddenKeywords: [],
     intentPhrases: [],

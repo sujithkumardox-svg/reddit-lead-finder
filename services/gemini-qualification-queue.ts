@@ -84,10 +84,10 @@ function mapRowToQueueRow(row: QueueRowRecord): GeminiQualificationQueueRow {
     redditScore: row.reddit_score as number,
     numComments: row.num_comments as number | null,
     itemCreatedAt: row.item_created_at as string,
-    matchedTerms: row.matched_terms as MatchingEngineResult,
-    numericalScore: row.numerical_score as number,
-    diversityBonus: row.diversity_bonus as number,
-    finalScore: row.final_score as number,
+    matchedTerms: row.matched_terms as MatchingEngineResult | null,
+    numericalScore: row.numerical_score as number | null,
+    diversityBonus: row.diversity_bonus as number | null,
+    finalScore: row.final_score as number | null,
     qualificationReason: row.qualification_reason as GeminiQualificationQueueRow["qualificationReason"],
     status: row.status as GeminiQualificationQueueRow["status"],
     processingStartedAt: row.processing_started_at as string | null,
@@ -146,11 +146,17 @@ export async function enqueueCandidate(
       reddit_score: input.redditScore,
       num_comments: input.numComments,
       item_created_at: input.itemCreatedAt,
-      matched_terms: input.matchedTerms,
-      numerical_score: input.numericalScore,
-      diversity_bonus: input.diversityBonus,
-      final_score: input.finalScore,
-      qualification_reason: input.qualificationReason,
+      // OLD Phase 7/8 fields - `undefined` for a NEW Phase 7 `LEAD`
+      // candidate (see `EnqueueGeminiCandidateInput`'s doc comment),
+      // persisted as `null` rather than fabricated. The now-nullable
+      // columns/CHECK constraint added by
+      // `20260923091000_gemini_qualification_queue_nullable_legacy_fields.sql`
+      // make this safe to insert.
+      matched_terms: input.matchedTerms ?? null,
+      numerical_score: input.numericalScore ?? null,
+      diversity_bonus: input.diversityBonus ?? null,
+      final_score: input.finalScore ?? null,
+      qualification_reason: input.qualificationReason ?? null,
     })
     .select(QUEUE_COLUMNS)
     .single();
