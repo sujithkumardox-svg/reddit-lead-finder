@@ -33,7 +33,7 @@ import {
  * must never affect Phase 9's Gemini configuration, and vice versa.
  */
 
-const LIGHTWEIGHT_AI_MODEL = process.env.LIGHTWEIGHT_AI_MODEL || "gemini-2.5-flash-lite";
+const LIGHTWEIGHT_AI_MODEL = process.env.LIGHTWEIGHT_AI_MODEL || "gemini-3.1-flash-lite";
 
 /**
  * Provenance-only label for the current provider. Not used for any
