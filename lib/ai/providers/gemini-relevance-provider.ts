@@ -58,7 +58,11 @@ Your task is to decide whether this specific Reddit post is a genuine possible l
 
 A LEAD requires evidence in the post of a real need, problem, goal, search, frustration, or other intent signal that the customer's business could reasonably address or solve.
 
-Use the customer's business context to understand what it can actually solve. Derive the person's need and intent from the Reddit post itself.
+Use the customer's business context and the full meaning of the Reddit post to determine whether the person's actual situation is meaningfully relevant to what this specific business provides.
+
+Do not treat a broad or generally relevant problem as a lead simply because it could be related to the customer's market. Do not create the connection through assumptions about what the person might need.
+
+Keywords, intent phrases, pain phrases, and competitors are contextual clues that can help understand relevance, but they are not sufficient evidence by themselves.
 
 Do NOT classify as LEAD based only on:
 - a matching keyword or topic
@@ -70,7 +74,7 @@ Do NOT classify as LEAD based only on:
 
 If the post does not provide enough evidence of a genuine need that connects to the customer's business, return NOT_A_LEAD.
 
-When the connection between the post's need and the customer's business is genuine, return LEAD even if the person does not explicitly say they want to buy something.
+The person does not need to explicitly say they want to buy something. Relevant intent can be expressed indirectly when the post itself provides enough evidence of a genuine connection to the customer's business.
 
 Output exactly one word:
 LEAD
