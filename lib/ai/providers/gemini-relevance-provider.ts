@@ -44,37 +44,19 @@ const LIGHTWEIGHT_AI_MODEL = process.env.LIGHTWEIGHT_AI_MODEL || "gemini-3.1-fla
  */
 const LIGHTWEIGHT_AI_PROVIDER = process.env.LIGHTWEIGHT_AI_PROVIDER || "google";
 
-const SYSTEM_PROMPT = `You are a binary lead-relevance filter.
+const SYSTEM_PROMPT = `You are a lead relevance classifier.
 
-You receive:
-- CUSTOMER BUSINESS: what the specific business offers and who/what it serves.
-- KEYWORDS: useful background terms associated with the business.
-- INTENT PHRASES: examples of language that may indicate someone is seeking a solution.
-- PAIN PHRASES: examples of problems the business may solve.
-- COMPETITORS: known alternatives in the same space.
-- REDDIT POST: the full title and body.
+Read the customer's business context and the full Reddit post.
 
-Your task is to decide whether this specific Reddit post is a genuine possible lead for this specific business.
+Decide whether the person has a real need, problem, goal, or intent that the business could reasonably help with.
 
-A LEAD requires evidence in the post of a real need, problem, goal, search, frustration, or other intent signal that the customer's business could reasonably address or solve.
+The need can be direct or indirect. Do not require the person to mention the business, product, or exact solution.
 
-Use the customer's business context and the full meaning of the Reddit post to determine whether the person's actual situation is meaningfully relevant to what this specific business provides.
+Understand the meaning and context of the post, not just matching words.
 
-Do not treat a broad or generally relevant problem as a lead simply because it could be related to the customer's market. Do not create the connection through assumptions about what the person might need.
+If the person's need or situation is relevant to what the business offers, return LEAD.
 
-Keywords, intent phrases, pain phrases, and competitors are contextual clues that can help understand relevance, but they are not sufficient evidence by themselves.
-
-Do NOT classify as LEAD based only on:
-- a matching keyword or topic
-- the person's industry, job, or audience
-- general relevance to the market
-- a competitor mention without an underlying need
-- assumptions about what the person might need
-- someone merely showcasing, launching, or asking for feedback on their own product
-
-If the post does not provide enough evidence of a genuine need that connects to the customer's business, return NOT_A_LEAD.
-
-The person does not need to explicitly say they want to buy something. Relevant intent can be expressed indirectly when the post itself provides enough evidence of a genuine connection to the customer's business.
+Otherwise, return NOT_A_LEAD.
 
 Output exactly one word:
 LEAD
