@@ -37,6 +37,149 @@ function looksLikeWebsite(value: string): boolean {
   return /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i.test(value.trim());
 }
 
+/**
+ * How long the HTML-declared-favicon fallback fetch (see
+ * `discoverDeclaredFaviconUrl`) is allowed to run before giving up. Kept
+ * short since this only ever runs after the primary (Google) favicon has
+ * already failed to load - it must not noticeably delay the existing
+ * generic Globe-icon fallback for sites where nothing works.
+ */
+const FAVICON_FALLBACK_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * Pulls the `href` of the first HTML-declared favicon
+ * (`<link rel="icon" ...>` or `<link rel="shortcut icon" ...>`) out of a
+ * raw HTML string. Intentionally a plain regex scan rather than
+ * `DOMParser` - this keeps the helper a dependency-free, environment-
+ * agnostic string transform (works the same in the browser and under
+ * Vitest's Node test environment, with nothing new to install or
+ * configure), which is all this narrow lookup needs.
+ *
+ * Mirrors the semantics of the CSS attribute selector `[rel~="icon"]`:
+ * matches `rel="icon"` and `rel="shortcut icon"` (and any other
+ * whitespace-separated rel list that includes the "icon" token), but not
+ * unrelated rel values like `apple-touch-icon`.
+ */
+export function extractDeclaredFaviconHref(html: string): string | null {
+  const linkTagPattern = /<link\b[^>]*>/gi;
+
+  for (const match of html.matchAll(linkTagPattern)) {
+    const tag = match[0];
+
+    const relMatch = /\brel\s*=\s*(['"])(.*?)\1/i.exec(tag);
+    if (!relMatch) continue;
+
+    const relTokens = relMatch[2].toLowerCase().split(/\s+/).filter(Boolean);
+    if (!relTokens.includes("icon")) continue;
+
+    const hrefMatch = /\bhref\s*=\s*(['"])(.*?)\1/i.exec(tag);
+    if (hrefMatch && hrefMatch[2].trim()) return hrefMatch[2].trim();
+  }
+
+  return null;
+}
+
+/**
+ * Resolves a (possibly relative) favicon `href` against the page it was
+ * declared on. Returns null instead of throwing for a malformed href/page
+ * URL - callers treat that exactly like "no fallback available".
+ */
+export function resolveFaviconHref(href: string, pageUrl: string): string | null {
+  try {
+    return new URL(href, pageUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Looks for an HTML-declared favicon on `pageUrl` and resolves it to an
+ * absolute URL, entirely from the browser. This is an ordinary, same-
+ * origin-policy-governed `fetch()` of a public page URL - not a server-
+ * side request - so it can only ever succeed against pages that
+ * explicitly allow cross-origin reads of their HTML (via CORS); it has no
+ * access to anything a server-side fetch would (internal network, etc.),
+ * so it introduces no SSRF surface.
+ *
+ * Every failure mode (network error, CORS block, timeout, missing/
+ * unparsable favicon link) is treated identically: resolve to null so the
+ * caller keeps its existing generic-icon fallback. Bounded by a single
+ * fetch with a timeout - never retries on its own.
+ */
+export async function discoverDeclaredFaviconUrl(pageUrl: string): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FAVICON_FALLBACK_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(pageUrl, { signal: controller.signal });
+    if (!response.ok) return null;
+
+    const html = await response.text();
+    const href = extractDeclaredFaviconHref(html);
+
+    return href ? resolveFaviconHref(href, pageUrl) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Drives a single favicon `<img>` through: the existing primary source
+ * (e.g. Google's favicon service, passed in as `primaryUrl`) first - if
+ * and only if that fails to load, one bounded attempt to discover and use
+ * the website's own HTML-declared favicon (via `discoverDeclaredFaviconUrl`
+ * against `pageUrl`) - and if that also fails, or nothing was found,
+ * `src` becomes null so the caller falls back to its existing generic
+ * icon / hidden-image behavior. Never retries beyond that single fallback
+ * attempt.
+ *
+ * Resets whenever `pageUrl` changes, and guards (`attemptedForRef`)
+ * against a slow, now-stale discovery request overwriting state for a
+ * newer URL - the same stale-request protection pattern used by
+ * `validationRequestRef` above, scoped to this one concern.
+ */
+function useFaviconWithFallback(primaryUrl: string | null, pageUrl: string | null) {
+  const [primaryFailed, setPrimaryFailed] = useState(false);
+  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
+  const [fallbackFailed, setFallbackFailed] = useState(false);
+  const attemptedForRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setPrimaryFailed(false);
+    setFallbackUrl(null);
+    setFallbackFailed(false);
+    attemptedForRef.current = null;
+  }, [pageUrl]);
+
+  const usingFallback = primaryFailed && Boolean(fallbackUrl) && !fallbackFailed;
+  const src = !primaryFailed ? primaryUrl : usingFallback ? fallbackUrl : null;
+
+  function handleError() {
+    if (usingFallback) {
+      // The fallback image itself just failed to load - final state,
+      // caller shows its generic icon. No further attempts.
+      setFallbackFailed(true);
+      return;
+    }
+
+    setPrimaryFailed(true);
+
+    if (!pageUrl || attemptedForRef.current === pageUrl) return;
+    attemptedForRef.current = pageUrl;
+
+    void discoverDeclaredFaviconUrl(pageUrl).then((discovered) => {
+      // `pageUrl` changed (new website typed, or a newer draft) since this
+      // attempt started - ignore the now-stale result.
+      if (attemptedForRef.current !== pageUrl) return;
+      if (discovered) setFallbackUrl(discovered);
+    });
+  }
+
+  return { src, handleError };
+}
+
 export function NewProjectWizard() {
   const router = useRouter();
   const [step, setStep] = useState<Step>("input");
@@ -54,8 +197,34 @@ export function NewProjectWizard() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [validationStatus, setValidationStatus] = useState<WebsiteValidationStatus>("idle");
   const [faviconUrl, setFaviconUrl] = useState<string | null>(null);
-  const [faviconError, setFaviconError] = useState(false);
+  const [validatedWebsiteUrl, setValidatedWebsiteUrl] = useState<string | null>(null);
   const validationRequestRef = useRef(0);
+
+  // Input-step favicon: primary (Google) source from `faviconUrl`, with a
+  // bounded fallback to the website's own HTML-declared favicon - see
+  // `useFaviconWithFallback`. `validatedWebsiteUrl` (the normalized URL
+  // returned by `validateWebsiteAction`, not the raw text the user is
+  // typing) is what the fallback fetches and resolves relative hrefs
+  // against.
+  const { src: inputFaviconSrc, handleError: handleInputFaviconError } = useFaviconWithFallback(
+    faviconUrl,
+    validatedWebsiteUrl,
+  );
+
+  // Review-step favicon: same primary + bounded-fallback behavior as the
+  // input step, keyed off the (fixed, already-normalized) `draft.websiteUrl`
+  // instead of the live-typed/validated input. Must be called
+  // unconditionally (Rules of Hooks) even before `draft` exists - the hook
+  // already treats a null `primaryUrl`/`pageUrl` as "nothing to show".
+  // Identical URL construction to the original inline JSX expression it
+  // replaces, just hoisted so it can be passed into the hook.
+  const reviewPrimaryFaviconUrl = draft
+    ? `https://www.google.com/s2/favicons?sz=64&domain=${new URL(draft.websiteUrl).hostname}`
+    : null;
+  const { src: reviewFaviconSrc, handleError: handleReviewFaviconError } = useFaviconWithFallback(
+    reviewPrimaryFaviconUrl,
+    draft?.websiteUrl ?? null,
+  );
 
   const isDirty =
     draft !== null &&
@@ -87,10 +256,12 @@ export function NewProjectWizard() {
 
     // Every input change immediately clears the previous validation
     // result - no outdated favicon/message/button state is ever shown.
+    // Clearing `validatedWebsiteUrl` here also resets the favicon
+    // fallback's own state (see `useFaviconWithFallback`'s effect).
     validationRequestRef.current += 1;
     setValidationStatus("idle");
     setFaviconUrl(null);
-    setFaviconError(false);
+    setValidatedWebsiteUrl(null);
 
     const trimmed = websiteUrl.trim();
     if (!trimmed) return;
@@ -114,6 +285,7 @@ export function NewProjectWizard() {
         }
 
         setFaviconUrl(result.data.faviconUrl);
+        setValidatedWebsiteUrl(result.data.websiteUrl);
         setValidationStatus("valid");
       });
     }, WEBSITE_VALIDATION_DEBOUNCE_MS);
@@ -297,13 +469,13 @@ export function NewProjectWizard() {
                 Website
               </label>
               <div className="relative">
-                {validationStatus === "valid" && faviconUrl && !faviconError ? (
+                {validationStatus === "valid" && inputFaviconSrc ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={faviconUrl}
+                    src={inputFaviconSrc}
                     alt=""
                     className="absolute top-1/2 left-3.5 size-4 -translate-y-1/2 rounded-sm"
-                    onError={() => setFaviconError(true)}
+                    onError={handleInputFaviconError}
                   />
                 ) : (
                   <Globe className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-neutral-500" />
@@ -386,12 +558,11 @@ export function NewProjectWizard() {
           <div className="mt-4 flex min-w-0 items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={`https://www.google.com/s2/favicons?sz=64&domain=${new URL(draft.websiteUrl).hostname}`}
+              src={reviewFaviconSrc ?? undefined}
               alt=""
               className="size-7 shrink-0 rounded-md"
-              onError={(event) => {
-                event.currentTarget.style.visibility = "hidden";
-              }}
+              style={reviewFaviconSrc ? undefined : { visibility: "hidden" }}
+              onError={handleReviewFaviconError}
             />
             <div className="flex min-w-0 flex-col">
               <p className="truncate text-sm font-medium text-white">{draft.name}</p>
