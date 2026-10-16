@@ -23,6 +23,7 @@ import {
   recordPhase7Outcome,
   recordPhase7ProcessingError,
 } from "@/services/reddit-phase7-processing";
+import { Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
 
 const mockedCreateClient = vi.mocked(createClient);
 
@@ -424,6 +425,26 @@ describe("claimPhase7Processing", () => {
     ).rejects.toThrow("Failed to claim the Phase 7 processing row.");
   });
 
+  it("throws a Phase 7 auth error on RLS 42501 and does not retry the insert", async () => {
+    const insertChain = createChain({
+      data: null,
+      error: {
+        code: "42501",
+        message: 'new row violates row-level security policy for table "reddit_phase7_processing"',
+        details: "",
+        hint: "",
+      },
+    });
+    const from = vi.fn(() => insertChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    await expect(
+      claimPhase7Processing({ projectId: "project-a", userId: "user-1", redditItemId: "t3_postx" }),
+    ).rejects.toBeInstanceOf(Phase7ClaimAuthError);
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(insertChain.insert).toHaveBeenCalledTimes(1);
+  });
+
   it("throws if the post-conflict lookup fails with a genuine database error", async () => {
     const insertChain = createChain({
       data: null,
@@ -473,7 +494,7 @@ describe("claimPhase7Processing", () => {
 
 describe("completePhase7Processing", () => {
   it("M. marks a claimed row completed with its terminal outcome, clearing any prior error info", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "phase7-row-1" }, error: null });
     const from = vi.fn(() => chain);
     mockedCreateClient.mockResolvedValue({ from } as never);
 
@@ -490,7 +511,7 @@ describe("completePhase7Processing", () => {
   });
 
   it("persists a NOT_A_LEAD terminal outcome identically", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "phase7-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await completePhase7Processing("phase7-row-1", "not_a_lead");
@@ -510,6 +531,17 @@ describe("completePhase7Processing", () => {
     await expect(completePhase7Processing("phase7-row-1", "lead")).rejects.toThrow(
       "Failed to complete the Phase 7 processing row.",
     );
+  });
+
+  it("does not treat a zero-row update as a completed Phase 7 row", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(completePhase7Processing("phase7-row-1", "lead")).rejects.toThrow(
+      "Failed to complete the Phase 7 processing row.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
   });
 });
 
@@ -543,5 +575,20 @@ describe("recordPhase7ProcessingError", () => {
     await expect(recordPhase7ProcessingError("phase7-row-1", "boom")).rejects.toThrow(
       "Failed to record the Phase 7 processing error.",
     );
+  });
+
+  it("leaves status and outcome unchanged when the diagnostic update matches zero rows", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await recordPhase7ProcessingError("phase7-row-1", "Gemini request timed out");
+
+    const payload = (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("status");
+    expect(payload).not.toHaveProperty("outcome");
+    expect(chain.update).toHaveBeenCalledTimes(1);
   });
 });

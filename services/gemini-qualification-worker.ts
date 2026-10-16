@@ -8,11 +8,13 @@ import type {
 } from "@/lib/ai/qualify-reddit-candidate";
 import { createScanMetrics, findSubredditMetrics, recordGeminiScoreBucket } from "@/lib/scans/scan-metrics";
 import {
+  AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE,
   claimNextPending,
   markFailed,
   markGeminiCallAttempted,
   recordGeminiResult,
   recoverStaleProcessing,
+  requeueAfterPersistFailure,
   saveQualificationResult,
 } from "@/services/gemini-qualification-queue";
 import { getProjectById } from "@/services/projects";
@@ -40,8 +42,11 @@ import type { ScanRunMetrics } from "@/types/scan-metrics";
  * module persists the qualified lead via `services/reddit-leads.ts` BEFORE
  * the queue row is marked `completed`. Subreddit safety lookup is deferred
  * for the MVP and is not on this persist path. Persistence is no longer
- * best-effort after completion: if persist throws, the row stays
- * recoverable (not `completed`) so a later claim can retry the upsert safely.
+ * best-effort after completion: if persist throws after the Gemini result
+ * is stored, the row stays `processing` until the other pending rows in
+ * this run are finished, then it is returned to `pending` with that result
+ * intact. A later worker reuses the stored result and retries the upsert.
+ * This run does not claim that same row again.
  *
  * Crash-recovery fix, in two layers:
  *
@@ -76,7 +81,8 @@ import type { ScanRunMetrics } from "@/types/scan-metrics";
 export type ProcessCandidateOutcome =
   | { outcome: "no_pending_candidates" }
   | { outcome: "processed"; queueId: string; aiQualified: boolean }
-  | { outcome: "failed"; queueId: string; error: string };
+  | { outcome: "failed"; queueId: string; error: string }
+  | { outcome: "persist_deferred"; queueId: string; error: string };
 
 /**
  * Builds the approved Phase 9B-1 input from one claimed queue row and its
@@ -260,6 +266,7 @@ export async function processNextGeminiQualificationCandidate(
 
   let result: QualifyRedditCandidateResult;
   let persistFailedThisCandidate = false;
+  let geminiResultUnstored = false;
   try {
     if (candidateAlreadyHasGeminiResult(claimed)) {
       // Crash-recovery path: Gemini already answered for this exact row in
@@ -299,7 +306,16 @@ export async function processNextGeminiQualificationCandidate(
       // POST-call checkpoint: durably record the result BEFORE anything
       // else, so a crash before persist / saveQualificationResult can
       // never cause this candidate to be sent to Gemini a second time.
-      await recordGeminiResult(claimed.id, result);
+      // A failed checkpoint means the in-memory answer is not stored.
+      // Do not continue into persist or completion, and do not call
+      // Gemini again. The row is failed with the existing ambiguous
+      // attempt message so recovery will not reset it to pending.
+      try {
+        await recordGeminiResult(claimed.id, result);
+      } catch (checkpointError) {
+        geminiResultUnstored = true;
+        throw checkpointError;
+      }
     }
 
     if (metrics) {
@@ -338,11 +354,35 @@ export async function processNextGeminiQualificationCandidate(
       `[gemini-qualification-worker] Failed to qualify candidate ${claimed.id}:`,
       error,
     );
-    if (metrics && !persistFailedThisCandidate) {
+    if (persistFailedThisCandidate) {
+      // Leave the row `processing` so this run cannot claim it again.
+      // The worker requeues it after the other pending rows are done.
+      // This path only runs after recordGeminiResult has stored the
+      // answer, so the later reclaim reuses that answer.
+      return { outcome: "persist_deferred", queueId: claimed.id, error: message };
+    }
+    if (metrics) {
       metrics.geminiErrors++;
     }
-    await markFailed(claimed.id, message);
-    return { outcome: "failed", queueId: claimed.id, error: message };
+    // An unstored Gemini answer stays failed under the existing ambiguous
+    // attempt message. That message is the no-retry contract: the row is
+    // not put back to pending, and Gemini is not called again. A result
+    // that did get stored is reused by the reclaim path, which only runs
+    // when this checkpoint succeeded.
+    const failureMessage = geminiResultUnstored ? AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE : message;
+    try {
+      await markFailed(claimed.id, failureMessage);
+    } catch (markError) {
+      // The candidate stays failed for this run. Do not reset it to pending:
+      // a missing checkpoint must not be sent to Gemini again. Other pending
+      // candidates can still be processed. The scan fails because this
+      // candidate counts as failed.
+      console.error(
+        `[gemini-qualification-worker] Failed to record the failure for candidate ${claimed.id}:`,
+        markError,
+      );
+    }
+    return { outcome: "failed", queueId: claimed.id, error: failureMessage };
   }
 
   if (metrics && result.aiQualified) {
@@ -407,6 +447,7 @@ export async function runGeminiQualificationWorker(
 
   await recoverStaleProcessing(undefined, projectId);
 
+  const deferredLeadSaves: { id: string; error: string }[] = [];
   const summary: GeminiQualificationWorkerSummary = {
     processed: 0,
     qualified: 0,
@@ -428,6 +469,11 @@ export async function runGeminiQualificationWorker(
       break;
     }
 
+    if (outcome.outcome === "persist_deferred") {
+      deferredLeadSaves.push({ id: outcome.queueId, error: outcome.error });
+      continue;
+    }
+
     if (outcome.outcome === "processed") {
       summary.processed++;
       if (outcome.aiQualified) {
@@ -435,6 +481,17 @@ export async function runGeminiQualificationWorker(
       }
     } else {
       summary.failed++;
+    }
+  }
+
+  for (const deferred of deferredLeadSaves) {
+    try {
+      await requeueAfterPersistFailure(deferred.id, deferred.error);
+    } catch (requeueError) {
+      console.error(
+        `[gemini-qualification-worker] Failed to requeue candidate ${deferred.id} after a lead save failure:`,
+        requeueError,
+      );
     }
   }
 

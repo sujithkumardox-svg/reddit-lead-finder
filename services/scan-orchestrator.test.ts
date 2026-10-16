@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
+import { Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
 
 vi.mock("@/services/reddit-scanner", () => ({
   scanProjectReddit: vi.fn(),
@@ -89,6 +90,7 @@ describe("runProjectScan", () => {
       userId: "user-1",
       projectId: "project-1",
       syncLogId: "sync-1",
+      accessToken: "scan-access-token",
     });
 
     expect(mockedScanProjectReddit).toHaveBeenCalledTimes(1);
@@ -139,6 +141,7 @@ describe("runProjectScan", () => {
       userId: "user-1",
       projectId: "project-1",
       syncLogId: "sync-1",
+      accessToken: "scan-access-token",
     });
 
     expect(mockedMarkSuccess).toHaveBeenCalledWith(
@@ -165,6 +168,7 @@ describe("runProjectScan", () => {
       userId: "user-1",
       projectId: "project-1",
       syncLogId: "sync-1",
+      accessToken: "scan-access-token",
     });
 
     expect(mockedRunWorker).not.toHaveBeenCalled();
@@ -181,11 +185,183 @@ describe("runProjectScan", () => {
     expect(message).not.toMatch(/REDDIT_CLIENT_SECRET|CLIENT_ID/i);
   });
 
-  it("can be invoked with explicit userId/projectId and no cookie/session arguments", async () => {
+  it("marks the scan failed when Phase 7 authorization is rejected and does not mark it successful", async () => {
+    mockedScanProjectReddit.mockRejectedValueOnce(new Phase7ClaimAuthError("42501"));
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not be authorized. Please sign in again.",
+      expect.objectContaining({
+        projectId: "project-1",
+        syncLogId: "sync-1",
+      }),
+    );
+  });
+
+  it("marks the scan failed when a Phase 9 candidate fails and does not mark it successful", async () => {
+    mockedRunWorker.mockResolvedValueOnce({
+      processed: 1,
+      qualified: 0,
+      failed: 1,
+      geminiCallsPerformed: 1,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 1,
+      strong8to10: 0,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 0,
+      persistFailed: 0,
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not finish qualifying every lead.",
+      expect.objectContaining({ projectId: "project-1", syncLogId: "sync-1" }),
+    );
+  });
+
+  it("marks the scan failed when a Phase 7 lead could not be queued", async () => {
+    mockedScanProjectReddit.mockImplementationOnce(async (_userId, _projectId, _handler, options) => {
+      if (options?.metrics) {
+        options.metrics.queueInsertFailed = 1;
+      }
+      return {
+        projectId: "project-1",
+        scannedAt: "2026-08-22T10:00:00.000Z",
+        subredditsScanned: [],
+        posts: [],
+        comments: [],
+      };
+    });
+    mockedRunWorker.mockResolvedValueOnce({
+      processed: 0,
+      qualified: 0,
+      failed: 0,
+      geminiCallsPerformed: 0,
+      geminiDuplicateSkips: 0,
+      geminiErrors: 0,
+      strong8to10: 0,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 0,
+      persistFailed: 0,
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not queue one or more leads for qualification.",
+      expect.objectContaining({ queueInsertFailed: 1 }),
+    );
+  });
+
+  it("marks the scan failed when Phase 7 reports errors and still succeeds when it does not", async () => {
+    mockedScanProjectReddit.mockImplementationOnce(async (_userId, _projectId, _handler, options) => {
+      if (options?.metrics) {
+        options.metrics.phase7Errors = 1;
+      }
+      return {
+        projectId: "project-1",
+        scannedAt: "2026-08-22T10:00:00.000Z",
+        subredditsScanned: [],
+        posts: [],
+        comments: [],
+      };
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not finish classifying every post.",
+      expect.objectContaining({ phase7Errors: 1 }),
+    );
+
+    mockedMarkSuccess.mockClear();
+    mockedMarkFailed.mockClear();
+    mockedScanProjectReddit.mockResolvedValueOnce({
+      projectId: "project-1",
+      scannedAt: "2026-08-22T10:00:00.000Z",
+      subredditsScanned: [],
+      posts: [],
+      comments: [],
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkFailed).not.toHaveBeenCalled();
+    expect(mockedMarkSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark the scan successful when a live Phase 7 claim was skipped", async () => {
+    mockedScanProjectReddit.mockImplementationOnce(async (_userId, _projectId, _handler, options) => {
+      if (options?.metrics) {
+        options.metrics.phase7ConcurrentSkipped = 1;
+      }
+      return {
+        projectId: "project-1",
+        scannedAt: "2026-08-22T10:00:00.000Z",
+        subredditsScanned: [],
+        posts: [],
+        comments: [],
+      };
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not finish classifying every post.",
+      expect.objectContaining({ phase7ConcurrentSkipped: 1, phase7Errors: 0 }),
+    );
+  });
+
+  it("runs from an explicit user, project, and access token", async () => {
     await runProjectScan({
       userId: "scheduler-user",
       projectId: "scheduler-project",
       syncLogId: "sync-sched",
+      accessToken: "scheduler-access-token",
     });
 
     expect(mockedScanProjectReddit).toHaveBeenCalledWith(

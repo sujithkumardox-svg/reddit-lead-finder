@@ -2,6 +2,8 @@ import "server-only";
 
 import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
+import { isPhase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
+import { isQualifiedLeadPersistError } from "@/lib/scans/qualified-lead-persist-error";
 import { createClient } from "@/lib/supabase/server";
 import type { ScanRunMetrics } from "@/types/scan-metrics";
 import type {
@@ -94,6 +96,14 @@ export function toSafeScanErrorMessage(error: unknown): string {
     return "Project not found.";
   }
 
+  if (isPhase7ClaimAuthError(error)) {
+    return "The scan could not be authorized. Please sign in again.";
+  }
+
+  if (isQualifiedLeadPersistError(error)) {
+    return "The scan could not save a qualified lead. It can be retried without running qualification again.";
+  }
+
   return "The scan failed. Please try again.";
 }
 
@@ -155,6 +165,11 @@ export async function insertRunningScan(
   return mapRowToSyncLog(data as SyncLogRecord);
 }
 
+/**
+ * Marks this scan `success`. The affected row is read back through the
+ * owner-scoped client. Zero rows is a failure, so a scan still `running`
+ * is not reported as finished.
+ */
 export async function markScanSuccess(
   syncLogId: string,
   leadsFound: number,
@@ -178,19 +193,29 @@ export async function markScanSuccess(
     payload.metrics = metrics;
   }
 
-  const { error } = await supabase.from("sync_logs").update(payload).eq("id", syncLogId);
+  const { data, error } = await supabase
+    .from("sync_logs")
+    .update(payload)
+    .eq("id", syncLogId)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("markScanSuccess Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No scan row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to record scan success.");
   }
 }
 
+/**
+ * Marks this scan `failed`. The affected row is read back through the
+ * owner-scoped client. Zero rows is a failure, so a scan still `running`
+ * is not reported as finished.
+ */
 export async function markScanFailed(
   syncLogId: string,
   errorMessage: string,
@@ -212,14 +237,19 @@ export async function markScanFailed(
     payload.metrics = metrics;
   }
 
-  const { error } = await supabase.from("sync_logs").update(payload).eq("id", syncLogId);
+  const { data, error } = await supabase
+    .from("sync_logs")
+    .update(payload)
+    .eq("id", syncLogId)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("markScanFailed Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No scan row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to record scan failure.");
   }

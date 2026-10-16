@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { QualifyRedditCandidateResult } from "@/lib/ai/qualify-reddit-candidate";
+import { Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
 import type { MatchingEngineResult } from "@/lib/matching/matching-engine";
 import type { EnqueueGeminiCandidateInput } from "@/types/gemini-qualification-queue";
 
@@ -20,11 +21,13 @@ import {
   claimNextPending,
   countProjectQueueRowsSince,
   enqueueCandidate,
+  hasQueuedRedditItemForProject,
   markCompleted,
   markFailed,
   markGeminiCallAttempted,
   recordGeminiResult,
   recoverStaleProcessing,
+  requeueAfterPersistFailure,
   saveQualificationResult,
 } from "@/services/gemini-qualification-queue";
 
@@ -285,6 +288,24 @@ describe("enqueueCandidate", () => {
     await expect(enqueueCandidate(makePostCandidateInput())).resolves.toBeNull();
   });
 
+  it("throws an authorization error on RLS 42501 and does not retry the insert", async () => {
+    const chain = createChain({
+      data: null,
+      error: {
+        code: "42501",
+        message: "new row violates row-level security policy",
+        details: "",
+        hint: "",
+      },
+    });
+    const from = vi.fn(() => chain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    await expect(enqueueCandidate(makePostCandidateInput())).rejects.toBeInstanceOf(Phase7ClaimAuthError);
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(chain.insert).toHaveBeenCalledTimes(1);
+  });
+
   it("9. relies on the pending default - never sends an explicit status on insert", async () => {
     const chain = createChain({ data: makeDbRow({ status: "pending" }), error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
@@ -527,7 +548,7 @@ describe("recoverStaleProcessing", () => {
 
 describe("markGeminiCallAttempted", () => {
   it("15. durably writes gemini_call_attempted_at for the given row - works identically for posts and comments (no item_type involved)", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     const from = vi.fn(() => chain);
     mockedCreateClient.mockResolvedValue({ from } as never);
 
@@ -536,6 +557,8 @@ describe("markGeminiCallAttempted", () => {
     expect(from).toHaveBeenCalledWith("gemini_qualification_queue");
     expect(chain.update).toHaveBeenCalledWith({ gemini_call_attempted_at: expect.any(String) });
     expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
+    expect(chain.update).toHaveBeenCalledTimes(1);
   });
 
   it("throws on a genuine database error", async () => {
@@ -549,24 +572,73 @@ describe("markGeminiCallAttempted", () => {
       "Failed to record that a Gemini call was attempted.",
     );
   });
+
+  it("does not treat a zero-row update as a recorded Gemini attempt", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(markGeminiCallAttempted("queue-row-1")).rejects.toThrow(
+      "Failed to record that a Gemini call was attempted.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+  });
 });
 
 describe("markCompleted", () => {
   it("12. marks a candidate completed (retained, not deleted)", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await markCompleted("queue-row-1");
 
     expect(chain.update).toHaveBeenCalledWith({ status: "completed", error_message: null });
     expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
     expect(chain).not.toHaveProperty("delete");
+  });
+
+  it("does not treat a zero-row update as a completed queue row", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(markCompleted("queue-row-1")).rejects.toThrow(
+      "Failed to mark Gemini candidate as completed.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+    const payload = (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(payload.status).toBe("completed");
+  });
+});
+
+describe("hasQueuedRedditItemForProject", () => {
+  it("matches only the same project and reddit item", async () => {
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(hasQueuedRedditItemForProject("project-a", "t3_post1")).resolves.toBe(true);
+
+    expect(chain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(chain.eq).toHaveBeenCalledWith("reddit_item_id", "t3_post1");
+    expect(chain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+  });
+
+  it("returns false when this project has no queue row, including when another project might", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(hasQueuedRedditItemForProject("project-a", "t3_post1")).resolves.toBe(false);
+    expect(chain.eq).toHaveBeenCalledWith("project_id", "project-a");
   });
 });
 
 describe("markFailed", () => {
   it("13. marks a candidate failed with an error message (retained, not deleted, available for retry/inspection)", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await markFailed("queue-row-1", "Gemini request timed out");
@@ -576,7 +648,44 @@ describe("markFailed", () => {
       error_message: "Gemini request timed out",
     });
     expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
     expect(chain).not.toHaveProperty("delete");
+  });
+
+  it("does not treat a zero-row update as a failed queue row", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(markFailed("queue-row-1", "Gemini request timed out")).rejects.toThrow(
+      "Failed to mark Gemini candidate as failed.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+    const payload = (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(payload.status).not.toBe("pending");
+  });
+});
+
+describe("requeueAfterPersistFailure", () => {
+  it("returns the row to pending without clearing the stored Gemini result", async () => {
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await requeueAfterPersistFailure("queue-row-1", "Failed to persist qualified lead.");
+
+    const payload = (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).toEqual({
+      status: "pending",
+      processing_started_at: null,
+      error_message: "Failed to persist qualified lead.",
+    });
+    expect(payload).not.toHaveProperty("ai_score");
+    expect(payload).not.toHaveProperty("gemini_call_attempted_at");
+    expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.eq).toHaveBeenCalledWith("status", "processing");
   });
 });
 
@@ -599,7 +708,7 @@ function makeQualifyResult(
 
 describe("saveQualificationResult", () => {
   it("14. persists the full Gemini result, including ai_possible_competitor_reason, and marks the row completed", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     const result = makeQualifyResult({
@@ -622,10 +731,11 @@ describe("saveQualificationResult", () => {
       error_message: null,
     });
     expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
   });
 
   it("15. persists a null ai_possible_competitor_reason when there is no possible competitor", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await saveQualificationResult("queue-row-1", makeQualifyResult());
@@ -637,11 +747,22 @@ describe("saveQualificationResult", () => {
       }),
     );
   });
+
+  it("does not treat a zero-row update as a completed qualification", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(saveQualificationResult("queue-row-1", makeQualifyResult())).rejects.toThrow(
+      "Failed to save Gemini qualification result.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+  });
 });
 
 describe("recordGeminiResult", () => {
   it("16. writes every ai_* column but never touches status or error_message", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "queue-row-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     const result = makeQualifyResult({
@@ -668,6 +789,23 @@ describe("recordGeminiResult", () => {
     expect(payload).not.toHaveProperty("status");
     expect(payload).not.toHaveProperty("error_message");
     expect(chain.eq).toHaveBeenCalledWith("id", "queue-row-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
+  });
+
+  it("does not treat a zero-row update as a stored Gemini result", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(recordGeminiResult("queue-row-1", makeQualifyResult())).rejects.toThrow(
+      "Failed to record Gemini qualification result.",
+    );
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+    const payload = (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(payload).not.toHaveProperty("status");
   });
 
   it("17. throws on a genuine database error", async () => {

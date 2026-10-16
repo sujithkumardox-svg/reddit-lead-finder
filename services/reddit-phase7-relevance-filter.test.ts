@@ -15,6 +15,7 @@ vi.mock("@/services/reddit-phase7-processing", () => ({
 
 vi.mock("@/services/gemini-qualification-queue", () => ({
   enqueueCandidate: vi.fn(),
+  hasQueuedRedditItemForProject: vi.fn(),
 }));
 
 vi.mock("@/lib/ai/providers/relevance-filter-provider", async (importOriginal) => {
@@ -26,7 +27,10 @@ vi.mock("@/lib/ai/providers/relevance-filter-provider", async (importOriginal) =
   };
 });
 
-import { enqueueCandidate } from "@/services/gemini-qualification-queue";
+import {
+  enqueueCandidate,
+  hasQueuedRedditItemForProject,
+} from "@/services/gemini-qualification-queue";
 import {
   claimPhase7Processing,
   completePhase7Processing,
@@ -46,6 +50,7 @@ import {
 } from "@/services/reddit-phase7-relevance-filter";
 import type { Phase7ProjectContext } from "@/services/reddit-phase7-relevance-filter";
 import { createScanMetrics } from "@/lib/scans/scan-metrics";
+import { Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
 import type { Phase7ClaimResult } from "@/types/reddit-phase7-processing";
 import type { RedditPostItem } from "@/types/reddit-scan";
 
@@ -53,6 +58,7 @@ const mockedClaim = vi.mocked(claimPhase7Processing);
 const mockedComplete = vi.mocked(completePhase7Processing);
 const mockedRecordError = vi.mocked(recordPhase7ProcessingError);
 const mockedEnqueueCandidate = vi.mocked(enqueueCandidate);
+const mockedHasQueuedRedditItem = vi.mocked(hasQueuedRedditItemForProject);
 const mockedGetProvider = vi.mocked(getRelevanceFilterProvider);
 
 function makeProvider(
@@ -113,6 +119,7 @@ beforeEach(() => {
   mockedComplete.mockResolvedValue(undefined);
   mockedRecordError.mockResolvedValue(undefined);
   mockedEnqueueCandidate.mockResolvedValue(null);
+  mockedHasQueuedRedditItem.mockResolvedValue(false);
 });
 
 describe("processPhase7ForPost - classification -> handoff", () => {
@@ -297,6 +304,7 @@ describe("processPhase7ForPost - concurrency", () => {
     // Only ONE authoritative terminal write - the losing worker never
     // completes/duplicates a processing row.
     expect(mockedComplete).toHaveBeenCalledTimes(1);
+    expect(mockedRecordError).not.toHaveBeenCalled();
   });
 });
 
@@ -392,16 +400,120 @@ describe("processPhase7ForPost - error handling", () => {
     expect(metrics.phase7Errors).toBe(1);
   });
 
-  it("a failure persisting the terminal outcome after a successful AI call is reported as an error and never hands the candidate to Phase 9", async () => {
+  it("enqueues a LEAD before marking Phase 7 completed", async () => {
     const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
     mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
     mockedClaim.mockResolvedValue({ kind: "claimed", row: makeClaimedRow() } as Phase7ClaimResult);
+    const order: string[] = [];
+    mockedEnqueueCandidate.mockImplementation(async () => {
+      order.push("enqueue");
+      return { id: "queue-row-1" } as never;
+    });
+    mockedComplete.mockImplementation(async () => {
+      order.push("complete");
+    });
+
+    const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost());
+
+    expect(outcome).toEqual({ outcome: "lead", enqueued: true });
+    expect(order).toEqual(["enqueue", "complete"]);
+  });
+
+  it("does not complete Phase 7 when queue insertion fails, and leaves the row retryable", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({ kind: "claimed", row: makeClaimedRow() } as Phase7ClaimResult);
+    mockedEnqueueCandidate.mockRejectedValueOnce(new Error("Failed to queue Gemini candidate."));
+    const metrics = createScanMetrics("project-a", "sync-1");
+
+    const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost(), {
+      metrics,
+    });
+
+    expect(outcome).toEqual({ outcome: "error", message: "Failed to queue Gemini candidate." });
+    expect(mockedComplete).not.toHaveBeenCalled();
+    expect(mockedRecordError).toHaveBeenCalledWith("phase7-row-1", "Failed to queue Gemini candidate.");
+    expect(metrics.queueInsertFailed).toBe(1);
+    expect(classifyRelevance).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows a queue authorization failure without completing Phase 7 or continuing", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({ kind: "claimed", row: makeClaimedRow() } as Phase7ClaimResult);
+    mockedEnqueueCandidate.mockRejectedValueOnce(new Phase7ClaimAuthError("42501"));
+
+    await expect(
+      processPhase7ForPost("user-1", "project-a", makeProject(), makePost()),
+    ).rejects.toBeInstanceOf(Phase7ClaimAuthError);
+    expect(mockedComplete).not.toHaveBeenCalled();
+    expect(mockedRecordError).not.toHaveBeenCalled();
+  });
+
+  it("a failure completing Phase 7 after a successful enqueue is reported as an error and does not mark the row completed", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({ kind: "claimed", row: makeClaimedRow() } as Phase7ClaimResult);
+    mockedEnqueueCandidate.mockResolvedValue({ id: "queue-row-1" } as never);
     mockedComplete.mockRejectedValueOnce(new Error("connection refused"));
 
     const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost());
 
     expect(outcome.outcome).toBe("error");
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
+    expect(mockedComplete).toHaveBeenCalledWith("phase7-row-1", "lead");
+  });
+
+  it("completes a reclaimed lead from the same project's queue row without calling the relevance model", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({
+      kind: "claimed",
+      row: makeClaimedRow({ attemptCount: 2, projectId: "project-a", redditItemId: "t3_post1" }),
+    } as Phase7ClaimResult);
+    mockedHasQueuedRedditItem.mockResolvedValueOnce(true);
+
+    const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost());
+
+    expect(outcome).toEqual({ outcome: "lead", enqueued: true });
+    expect(mockedHasQueuedRedditItem).toHaveBeenCalledWith("project-a", "t3_post1");
+    expect(classifyRelevance).not.toHaveBeenCalled();
     expect(mockedEnqueueCandidate).not.toHaveBeenCalled();
+    expect(mockedComplete).toHaveBeenCalledWith("phase7-row-1", "lead");
+  });
+
+  it("classifies a reclaimed row when this project has no queue entry", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({
+      kind: "claimed",
+      row: makeClaimedRow({ attemptCount: 2 }),
+    } as Phase7ClaimResult);
+    mockedHasQueuedRedditItem.mockResolvedValueOnce(false);
+    mockedEnqueueCandidate.mockResolvedValue({ id: "queue-row-1" } as never);
+
+    const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost());
+
+    expect(outcome).toEqual({ outcome: "lead", enqueued: true });
+    expect(classifyRelevance).toHaveBeenCalledTimes(1);
+    expect(mockedEnqueueCandidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat another project's queue entry as a reason to skip classification", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("not_a_lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockResolvedValue({
+      kind: "claimed",
+      row: makeClaimedRow({ attemptCount: 2, projectId: "project-a" }),
+    } as Phase7ClaimResult);
+    mockedHasQueuedRedditItem.mockImplementation(async (projectId) => projectId === "project-b");
+
+    const outcome = await processPhase7ForPost("user-1", "project-a", makeProject(), makePost());
+
+    expect(mockedHasQueuedRedditItem).toHaveBeenCalledWith("project-a", "t3_post1");
+    expect(mockedHasQueuedRedditItem).not.toHaveBeenCalledWith("project-b", expect.anything());
+    expect(classifyRelevance).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({ outcome: "not_a_lead" });
   });
 
   it("does not throw out of processPhase7ForPost for any of the above failure modes", async () => {
@@ -411,6 +523,32 @@ describe("processPhase7ForPost - error handling", () => {
     await expect(
       processPhase7ForPost("user-1", "project-a", makeProject(), makePost()),
     ).resolves.toMatchObject({ outcome: "error" });
+  });
+
+  it("rethrows an RLS auth failure without calling the relevance provider or the next post", async () => {
+    const classifyRelevance = vi.fn<() => Promise<RelevanceFilterOutcome>>().mockResolvedValue("lead");
+    mockedGetProvider.mockReturnValue(makeProvider(classifyRelevance));
+    mockedClaim.mockImplementation(async ({ redditItemId }) => {
+      if (redditItemId === "t3_b") {
+        throw new Phase7ClaimAuthError("42501");
+      }
+      return { kind: "claimed", row: makeClaimedRow() } as Phase7ClaimResult;
+    });
+    mockedEnqueueCandidate.mockResolvedValue({ id: "queue-row" } as never);
+
+    const posts = [makePost({ id: "t3_a" }), makePost({ id: "t3_b" }), makePost({ id: "t3_c" })];
+
+    await expect(
+      runPhase7RelevanceFilter("user-1", "project-a", makeProject(), posts),
+    ).rejects.toBeInstanceOf(Phase7ClaimAuthError);
+
+    expect(mockedClaim).toHaveBeenCalledTimes(2);
+    expect(classifyRelevance).toHaveBeenCalledTimes(1);
+    expect(mockedComplete).toHaveBeenCalledTimes(1);
+    expect(mockedClaim).not.toHaveBeenCalledWith(
+      expect.objectContaining({ redditItemId: "t3_c" }),
+      undefined,
+    );
   });
 });
 

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RedditProviderError } from "@/lib/reddit/providers/reddit-post-search-provider";
 import { RedditApiError } from "@/lib/reddit/reddit-api-client";
+import { Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
+import { QualifiedLeadPersistError } from "@/lib/scans/qualified-lead-persist-error";
 import type { SyncLogRow } from "@/types/sync-logs";
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -102,7 +104,7 @@ describe("insertRunningScan", () => {
 
 describe("markScanSuccess", () => {
   it("marks the row success with leads_found and completed_at", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "sync-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await markScanSuccess("sync-1", 4);
@@ -116,10 +118,11 @@ describe("markScanSuccess", () => {
       }),
     );
     expect(chain.eq).toHaveBeenCalledWith("id", "sync-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
   });
 
   it("persists metrics onto the same row when provided", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "sync-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
     const metrics = { projectId: "project-1", syncLogId: "sync-1", leadsFound: 4 };
 
@@ -133,11 +136,20 @@ describe("markScanSuccess", () => {
       }),
     );
   });
+
+  it("does not treat a zero-row update as a successful scan", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(markScanSuccess("sync-1", 4)).rejects.toThrow("Failed to record scan success.");
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
+  });
 });
 
 describe("markScanFailed", () => {
   it("marks the row failed with a safe error_message and completed_at", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "sync-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
     await markScanFailed("sync-1", "The Reddit scan failed. Please try again.");
@@ -150,10 +162,11 @@ describe("markScanFailed", () => {
       }),
     );
     expect(chain.eq).toHaveBeenCalledWith("id", "sync-1");
+    expect(chain.select).toHaveBeenCalledWith("id");
   });
 
   it("persists partial metrics onto the same failed row when provided", async () => {
-    const chain = createChain({ data: null, error: null });
+    const chain = createChain({ data: { id: "sync-1" }, error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
     const metrics = { projectId: "project-1", syncLogId: "sync-1", rawPosts: 3 };
 
@@ -166,6 +179,17 @@ describe("markScanFailed", () => {
         metrics,
       }),
     );
+  });
+
+  it("does not treat a zero-row update as a failed scan", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(
+      markScanFailed("sync-1", "The Reddit scan failed. Please try again."),
+    ).rejects.toThrow("Failed to record scan failure.");
+    expect(chain.update).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id");
   });
 });
 
@@ -313,6 +337,24 @@ describe("toSafeScanErrorMessage", () => {
         }),
       ),
     ).toBe("The Reddit scan failed. Please try again.");
+  });
+
+  it("maps a Phase 7 authorization failure without including the database error text", () => {
+    const message = toSafeScanErrorMessage(new Phase7ClaimAuthError("42501"));
+
+    expect(message).toBe("The scan could not be authorized. Please sign in again.");
+    expect(message).not.toMatch(/42501|row-level security|token/i);
+  });
+
+  it("maps a qualified-lead save failure to a retryable message without the raw error", () => {
+    const message = toSafeScanErrorMessage(
+      new QualifiedLeadPersistError("duplicate key value violates constraint secret_token"),
+    );
+
+    expect(message).toBe(
+      "The scan could not save a qualified lead. It can be retried without running qualification again.",
+    );
+    expect(message).not.toMatch(/secret_token|duplicate key/i);
   });
 });
 

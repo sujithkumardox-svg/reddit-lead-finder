@@ -30,7 +30,7 @@ const mockedCreateClient = vi.mocked(createClient);
  */
 function createChain(result: { data: unknown; error: unknown; count?: number | null }) {
   const chain: Record<string, unknown> = {
-    upsert: vi.fn(() => Promise.resolve(result)),
+    upsert: vi.fn(() => chain),
     select: vi.fn(() => chain),
     update: vi.fn(() => chain),
     delete: vi.fn(() => chain),
@@ -39,6 +39,7 @@ function createChain(result: { data: unknown; error: unknown; count?: number | n
     lte: vi.fn(() => chain),
     order: vi.fn(() => chain),
     limit: vi.fn(() => chain),
+    maybeSingle: vi.fn(() => Promise.resolve(result)),
     then: (
       onFulfilled: (value: typeof result) => unknown,
       onRejected?: (reason: unknown) => unknown,
@@ -105,6 +106,15 @@ function makePostLeadInput(overrides: Partial<PersistQualifiedLeadInput> = {}): 
   };
 }
 
+function confirmedLeadRow(input: PersistQualifiedLeadInput) {
+  return {
+    id: "lead-1",
+    project_id: input.projectId,
+    user_id: input.userId,
+    reddit_item_id: input.redditItemId,
+  };
+}
+
 function makeCommentLeadInput(overrides: Partial<PersistQualifiedLeadInput> = {}): PersistQualifiedLeadInput {
   return makePostLeadInput({
     redditItemId: "t1_comment1",
@@ -123,11 +133,12 @@ beforeEach(() => {
 
 describe("persistQualifiedLead", () => {
   it("1. upserts a qualified post lead keyed on (project_id, reddit_item_id)", async () => {
-    const chain = createChain({ data: null, error: null });
+    const input = makePostLeadInput();
+    const chain = createChain({ data: confirmedLeadRow(input), error: null });
     const from = vi.fn(() => chain);
     mockedCreateClient.mockResolvedValue({ from } as never);
 
-    await persistQualifiedLead(makePostLeadInput());
+    await persistQualifiedLead(input);
 
     expect(from).toHaveBeenCalledWith("reddit_leads");
     expect(chain.upsert).toHaveBeenCalledWith(
@@ -146,13 +157,15 @@ describe("persistQualifiedLead", () => {
       }),
       { onConflict: "project_id,reddit_item_id" },
     );
+    expect(chain.select).toHaveBeenCalledWith("id, project_id, user_id, reddit_item_id");
   });
 
   it("2. upserts a qualified comment lead with its parent post id and null num_comments", async () => {
-    const chain = createChain({ data: null, error: null });
+    const input = makeCommentLeadInput();
+    const chain = createChain({ data: confirmedLeadRow(input), error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
-    await persistQualifiedLead(makeCommentLeadInput());
+    await persistQualifiedLead(input);
 
     expect(chain.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -167,15 +180,14 @@ describe("persistQualifiedLead", () => {
   });
 
   it("3. persists the full AI result including ai_possible_competitor_reason and writes null safety when omitted", async () => {
-    const chain = createChain({ data: null, error: null });
+    const input = makePostLeadInput({
+      aiPossibleCompetitor: "Syften",
+      aiPossibleCompetitorReason: "The author says they currently use Syften.",
+    });
+    const chain = createChain({ data: confirmedLeadRow(input), error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
-    await persistQualifiedLead(
-      makePostLeadInput({
-        aiPossibleCompetitor: "Syften",
-        aiPossibleCompetitorReason: "The author says they currently use Syften.",
-      }),
-    );
+    await persistQualifiedLead(input);
 
     expect(chain.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -193,15 +205,14 @@ describe("persistQualifiedLead", () => {
   });
 
   it("3b. still writes an explicit safety badge when one is provided", async () => {
-    const chain = createChain({ data: null, error: null });
+    const input = makePostLeadInput({
+      safetyBadge: "promo_not_safe",
+      safetyExplanation: "Rule \"No self-promotion\" explicitly bans promotion.",
+    });
+    const chain = createChain({ data: confirmedLeadRow(input), error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
-    await persistQualifiedLead(
-      makePostLeadInput({
-        safetyBadge: "promo_not_safe",
-        safetyExplanation: "Rule \"No self-promotion\" explicitly bans promotion.",
-      }),
-    );
+    await persistQualifiedLead(input);
 
     expect(chain.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -213,10 +224,11 @@ describe("persistQualifiedLead", () => {
   });
 
   it("4. never includes a status field in the upsert payload, so an existing lead's status is never reset", async () => {
-    const chain = createChain({ data: null, error: null });
+    const input = makePostLeadInput();
+    const chain = createChain({ data: confirmedLeadRow(input), error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
-    await persistQualifiedLead(makePostLeadInput());
+    await persistQualifiedLead(input);
 
     const payload = (chain.upsert as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
     expect(payload).not.toHaveProperty("status");
@@ -231,6 +243,32 @@ describe("persistQualifiedLead", () => {
 
     await expect(persistQualifiedLead(makePostLeadInput())).rejects.toThrow(
       "Failed to persist qualified lead.",
+    );
+  });
+
+  it("does not treat a response with no returned lead row as a successful save", async () => {
+    const chain = createChain({ data: null, error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(persistQualifiedLead(makePostLeadInput())).rejects.toThrow(
+      "Failed to persist qualified lead.",
+    );
+    expect(chain.upsert).toHaveBeenCalledTimes(1);
+    expect(chain.select).toHaveBeenCalledWith("id, project_id, user_id, reddit_item_id");
+  });
+
+  it("does not accept a returned row for a different project", async () => {
+    const input = makePostLeadInput();
+    const chain = createChain({
+      data: { ...confirmedLeadRow(input), project_id: "project-b" },
+      error: null,
+    });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    await expect(persistQualifiedLead(input)).rejects.toThrow("Failed to persist qualified lead.");
+    expect(chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ project_id: "project-1", reddit_item_id: "t3_post1" }),
+      { onConflict: "project_id,reddit_item_id" },
     );
   });
 });

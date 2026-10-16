@@ -1,5 +1,9 @@
 import "server-only";
 
+import {
+  isPhase7AuthRejectionCode,
+  Phase7ClaimAuthError,
+} from "@/lib/scans/phase7-claim-error";
 import { createClient } from "@/lib/supabase/server";
 import type {
   ClaimPhase7ProcessingInput,
@@ -56,6 +60,23 @@ type Phase7RowRecord = {
   updated_at: unknown;
 };
 
+function throwPhase7DatabaseError(
+  scope: string,
+  error: { message: string; code?: string; details?: string; hint?: string },
+  fallback: string,
+): never {
+  console.error(scope, {
+    message: error.message,
+    code: error.code,
+    details: error.details,
+    hint: error.hint,
+  });
+  if (isPhase7AuthRejectionCode(error.code)) {
+    throw new Phase7ClaimAuthError(error.code as string);
+  }
+  throw new Error(fallback);
+}
+
 function mapRowToPhase7Row(row: Phase7RowRecord): Phase7ProcessingRow {
   return {
     id: row.id as string,
@@ -94,13 +115,11 @@ export async function getPhase7ProcessingRecord(
     .maybeSingle();
 
   if (error) {
-    console.error("getPhase7ProcessingRecord Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to look up the Phase 7 processing record.");
+    throwPhase7DatabaseError(
+      "getPhase7ProcessingRecord Supabase error:",
+      error,
+      "Failed to look up the Phase 7 processing record.",
+    );
   }
 
   return data ? mapRowToPhase7Row(data as Phase7RowRecord) : null;
@@ -163,13 +182,11 @@ export async function recordPhase7Outcome(
       );
       return null;
     }
-    console.error("recordPhase7Outcome Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to record Phase 7 processing outcome.");
+    throwPhase7DatabaseError(
+      "recordPhase7Outcome Supabase error:",
+      error,
+      "Failed to record Phase 7 processing outcome.",
+    );
   }
 
   return mapRowToPhase7Row(data as Phase7RowRecord);
@@ -248,13 +265,11 @@ export async function claimPhase7Processing(
   }
 
   if (insertError.code !== "23505") {
-    console.error("claimPhase7Processing Supabase insert error:", {
-      message: insertError.message,
-      code: insertError.code,
-      details: insertError.details,
-      hint: insertError.hint,
-    });
-    throw new Error("Failed to claim the Phase 7 processing row.");
+    throwPhase7DatabaseError(
+      "claimPhase7Processing Supabase insert error:",
+      insertError,
+      "Failed to claim the Phase 7 processing row.",
+    );
   }
 
   // Someone (this pair) already has a row - load it to decide whether
@@ -268,13 +283,11 @@ export async function claimPhase7Processing(
     .maybeSingle();
 
   if (selectError) {
-    console.error("claimPhase7Processing Supabase select error:", {
-      message: selectError.message,
-      code: selectError.code,
-      details: selectError.details,
-      hint: selectError.hint,
-    });
-    throw new Error("Failed to look up the existing Phase 7 processing row after a claim conflict.");
+    throwPhase7DatabaseError(
+      "claimPhase7Processing Supabase select error:",
+      selectError,
+      "Failed to look up the existing Phase 7 processing row after a claim conflict.",
+    );
   }
 
   if (!existingData) {
@@ -319,13 +332,11 @@ export async function claimPhase7Processing(
     .maybeSingle();
 
   if (reclaimError) {
-    console.error("claimPhase7Processing Supabase reclaim error:", {
-      message: reclaimError.message,
-      code: reclaimError.code,
-      details: reclaimError.details,
-      hint: reclaimError.hint,
-    });
-    throw new Error("Failed to reclaim the stale Phase 7 processing row.");
+    throwPhase7DatabaseError(
+      "claimPhase7Processing Supabase reclaim error:",
+      reclaimError,
+      "Failed to reclaim the stale Phase 7 processing row.",
+    );
   }
 
   if (!reclaimedData) {
@@ -351,19 +362,19 @@ export async function claimPhase7Processing(
 export async function completePhase7Processing(id: string, outcome: Phase7Outcome): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("reddit_phase7_processing")
     .update({ status: "completed", outcome, last_error: null, last_error_at: null })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
-    console.error("completePhase7Processing Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to complete the Phase 7 processing row.");
+  if (error || !data) {
+    throwPhase7DatabaseError(
+      "completePhase7Processing Supabase error:",
+      error ?? { message: "No Phase 7 processing row was updated." },
+      "Failed to complete the Phase 7 processing row.",
+    );
   }
 }
 
@@ -386,12 +397,10 @@ export async function recordPhase7ProcessingError(id: string, errorMessage: stri
     .eq("id", id);
 
   if (error) {
-    console.error("recordPhase7ProcessingError Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to record the Phase 7 processing error.");
+    throwPhase7DatabaseError(
+      "recordPhase7ProcessingError Supabase error:",
+      error,
+      "Failed to record the Phase 7 processing error.",
+    );
   }
 }

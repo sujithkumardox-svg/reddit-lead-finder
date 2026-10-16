@@ -123,40 +123,58 @@ function mapRowToLeadRow(row: LeadRowRecord): RedditLeadRow {
 export async function persistQualifiedLead(input: PersistQualifiedLeadInput): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase.from("reddit_leads").upsert(
-    {
-      project_id: input.projectId,
-      user_id: input.userId,
-      reddit_item_id: input.redditItemId,
-      item_type: input.itemType,
-      parent_post_id: input.parentPostId,
-      subreddit: input.subreddit,
-      title: input.title,
-      content: input.content,
-      author: input.author,
-      author_id: input.authorId,
-      permalink: input.permalink,
-      score: input.score,
-      num_comments: input.numComments,
-      item_created_at: input.itemCreatedAt,
-      ai_score: input.aiScore,
-      ai_match_type: input.aiMatchType,
-      ai_lead_summary: input.aiLeadSummary,
-      ai_match_reason: input.aiMatchReason,
-      ai_possible_competitor: input.aiPossibleCompetitor,
-      ai_possible_competitor_reason: input.aiPossibleCompetitorReason,
-      safety_badge: input.safetyBadge ?? null,
-      safety_explanation: input.safetyExplanation ?? null,
-    },
-    { onConflict: "project_id,reddit_item_id" },
-  );
+  // supabase-js does not return written rows unless `.select()` is chained.
+  // The returned representation is the row this upsert modified. It is checked
+  // against this project, owner, and Reddit item. An error, or a response
+  // with no matching row, means this write is not confirmed.
+  const { data, error } = await supabase
+    .from("reddit_leads")
+    .upsert(
+      {
+        project_id: input.projectId,
+        user_id: input.userId,
+        reddit_item_id: input.redditItemId,
+        item_type: input.itemType,
+        parent_post_id: input.parentPostId,
+        subreddit: input.subreddit,
+        title: input.title,
+        content: input.content,
+        author: input.author,
+        author_id: input.authorId,
+        permalink: input.permalink,
+        score: input.score,
+        num_comments: input.numComments,
+        item_created_at: input.itemCreatedAt,
+        ai_score: input.aiScore,
+        ai_match_type: input.aiMatchType,
+        ai_lead_summary: input.aiLeadSummary,
+        ai_match_reason: input.aiMatchReason,
+        ai_possible_competitor: input.aiPossibleCompetitor,
+        ai_possible_competitor_reason: input.aiPossibleCompetitorReason,
+        safety_badge: input.safetyBadge ?? null,
+        safety_explanation: input.safetyExplanation ?? null,
+      },
+      { onConflict: "project_id,reddit_item_id" },
+    )
+    .select("id, project_id, user_id, reddit_item_id")
+    .maybeSingle();
 
-  if (error) {
+  const persisted = data as {
+    project_id?: string;
+    user_id?: string;
+    reddit_item_id?: string;
+  } | null;
+  const confirmed =
+    persisted?.project_id === input.projectId &&
+    persisted.user_id === input.userId &&
+    persisted.reddit_item_id === input.redditItemId;
+
+  if (error || !confirmed) {
     console.error("persistQualifiedLead Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "The qualified lead upsert did not return the intended row.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to persist qualified lead.");
   }

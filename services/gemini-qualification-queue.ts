@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isPhase7AuthRejectionCode, Phase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
 import { createClient } from "@/lib/supabase/server";
 import type { QualifyRedditCandidateResult } from "@/lib/ai/qualify-reddit-candidate";
 import type { MatchingEngineResult } from "@/lib/matching/matching-engine";
@@ -174,10 +175,48 @@ export async function enqueueCandidate(
       details: error.details,
       hint: error.hint,
     });
+    if (isPhase7AuthRejectionCode(error.code)) {
+      throw new Phase7ClaimAuthError(error.code);
+    }
     throw new Error("Failed to queue Gemini candidate.");
   }
 
   return mapRowToQueueRow(data as QueueRowRecord);
+}
+
+/**
+ * Whether this project already has a Phase 9 queue row for this Reddit
+ * item. Scoped to `project_id` so another project's row cannot match.
+ * Used when a Phase 7 processing row is reclaimed after a lead was queued
+ * but the Phase 7 completion update did not land.
+ */
+export async function hasQueuedRedditItemForProject(
+  projectId: string,
+  redditItemId: string,
+): Promise<boolean> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("gemini_qualification_queue")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("reddit_item_id", redditItemId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("hasQueuedRedditItemForProject Supabase error:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    if (isPhase7AuthRejectionCode(error.code)) {
+      throw new Phase7ClaimAuthError(error.code);
+    }
+    throw new Error("Failed to look up the Phase 9 queue entry.");
+  }
+
+  return data !== null;
 }
 
 /**
@@ -274,21 +313,27 @@ export async function claimNextPending(
  * column still `null`) apart from "Gemini may already have been called,
  * outcome unknown" (this column set, but no `ai_*` result recorded) - see
  * its doc comment for exactly how that distinction is used.
+ *
+ * The affected row is read back through the same owner-scoped client.
+ * Zero rows is a failure, so the caller does not call Gemini without a
+ * durable attempt marker and does not retry the call from this function.
  */
 export async function markGeminiCallAttempted(id: string): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gemini_qualification_queue")
     .update({ gemini_call_attempted_at: new Date().toISOString() })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("markGeminiCallAttempted Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No queue row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to record that a Gemini call was attempted.");
   }
@@ -297,22 +342,26 @@ export async function markGeminiCallAttempted(id: string): Promise<void> {
 /**
  * Marks a claimed row as `completed` once a future Gemini worker has
  * finished processing it successfully. Retained indefinitely (MVP
- * retention policy) as an audit trail - never deleted here.
+ * retention policy) as an audit trail - never deleted here. The affected
+ * row is read back through the same owner-scoped client. Zero rows is a
+ * failure, so an unchanged row is not reported as completed.
  */
 export async function markCompleted(id: string): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gemini_qualification_queue")
     .update({ status: "completed", error_message: null })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("markCompleted Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No queue row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to mark Gemini candidate as completed.");
   }
@@ -334,6 +383,10 @@ export async function markCompleted(id: string): Promise<void> {
  * `candidateAlreadyHasGeminiResult` check is what actually uses this to
  * skip calling Gemini a second time; this function only provides the
  * durable write that check relies on.
+ *
+ * The affected row is read back through the same owner-scoped client.
+ * Zero rows is a failure. This update does not change `status`, so a
+ * missed write cannot reset the row to `pending`.
  */
 export async function recordGeminiResult(
   id: string,
@@ -341,7 +394,7 @@ export async function recordGeminiResult(
 ): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gemini_qualification_queue")
     .update({
       ai_qualified: result.aiQualified,
@@ -354,14 +407,16 @@ export async function recordGeminiResult(
       ai_provider: result.aiProvider,
       ai_model: result.aiModel,
     })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("recordGeminiResult Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No queue row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to record Gemini qualification result.");
   }
@@ -376,7 +431,9 @@ export async function recordGeminiResult(
  * happen in one atomic write, there is never a window where the AI result
  * is saved without the row also being marked successfully completed, or
  * vice versa - satisfying "mark successful only after the result is
- * saved" without needing two separate round trips.
+ * saved" without needing two separate round trips. The affected row is
+ * read back through the same owner-scoped client. Zero rows is a failure,
+ * so the caller cannot treat an unchanged row as completed.
  */
 export async function saveQualificationResult(
   id: string,
@@ -384,7 +441,7 @@ export async function saveQualificationResult(
 ): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gemini_qualification_queue")
     .update({
       ai_qualified: result.aiQualified,
@@ -399,14 +456,16 @@ export async function saveQualificationResult(
       status: "completed",
       error_message: null,
     })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("saveQualificationResult Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No queue row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to save Gemini qualification result.");
   }
@@ -416,23 +475,61 @@ export async function saveQualificationResult(
  * Marks a claimed row as `failed` after a future Gemini worker's
  * processing attempt errors out. The row remains in the database
  * (retained, not deleted) so it stays available for retry or inspection.
+ * The affected row is read back through the same owner-scoped client.
+ * Zero rows is a failure. This update never sets `status` back to
+ * `pending`.
  */
 export async function markFailed(id: string, errorMessage: string): Promise<void> {
   const supabase = await createClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gemini_qualification_queue")
     .update({ status: "failed", error_message: errorMessage })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error("markFailed Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
+      message: error?.message ?? "No queue row was updated.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
     });
     throw new Error("Failed to mark Gemini candidate as failed.");
+  }
+}
+
+/**
+ * Puts a claimed row back to `pending` after the Gemini result is already
+ * stored but saving the qualified lead failed. Does not clear `ai_*`
+ * columns or `gemini_call_attempted_at`, so the next claim reuses the
+ * stored result instead of calling Gemini again. Only matches a row that
+ * is still `processing`, so a completed row is never reopened.
+ */
+export async function requeueAfterPersistFailure(id: string, errorMessage: string): Promise<void> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("gemini_qualification_queue")
+    .update({
+      status: "pending",
+      processing_started_at: null,
+      error_message: errorMessage,
+    })
+    .eq("id", id)
+    .eq("status", "processing")
+    .select("id")
+    .maybeSingle();
+
+  if (error || !data) {
+    console.error("requeueAfterPersistFailure Supabase error:", {
+      message: error?.message ?? "No processing row was requeued.",
+      code: error?.code,
+      details: error?.details,
+      hint: error?.hint,
+    });
+    throw new Error("Failed to requeue the qualified lead for persistence.");
   }
 }
 

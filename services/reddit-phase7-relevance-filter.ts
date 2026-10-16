@@ -7,7 +7,11 @@ import {
 import type { RelevanceFilterInput, RelevanceFilterOutcome } from "@/lib/ai/providers/relevance-filter-provider";
 import { combineRedditPostText } from "@/lib/reddit/combine-reddit-post-text";
 import { findSubredditMetrics } from "@/lib/scans/scan-metrics";
-import { enqueueCandidate } from "@/services/gemini-qualification-queue";
+import { isPhase7ClaimAuthError } from "@/lib/scans/phase7-claim-error";
+import {
+  enqueueCandidate,
+  hasQueuedRedditItemForProject,
+} from "@/services/gemini-qualification-queue";
 import {
   claimPhase7Processing,
   completePhase7Processing,
@@ -40,22 +44,22 @@ import type { ScanRunMetrics, ScanSubredditMetrics } from "@/types/scan-metrics"
  *      bounded number of retries ONLY for errors the provider classifies
  *      as `"transient"`. Never a tight loop, never blind retry of every
  *      exception.
- *   3. On success: `completePhase7Processing` persists the terminal
- *      outcome. `NOT_A_LEAD` stops here - it is never sent to Phase 9,
- *      never creates a dashboard lead. `LEAD` is handed, via the ORIGINAL
- *      Reddit post data, into the EXISTING Phase 9
- *      `enqueueCandidate()` path (`services/gemini-qualification-queue.ts`)
- *      - the same function OLD Phase 8 already used - so Phase 9 itself
- *      (its provider, prompt, scoring, enrichment, worker, retry/recovery)
- *      is never touched.
+ *   3. On success: `NOT_A_LEAD` is completed and stops here - it is never
+ *      sent to Phase 9. `LEAD` is handed, via the ORIGINAL Reddit post
+ *      data, into the EXISTING Phase 9 `enqueueCandidate()` path
+ *      (`services/gemini-qualification-queue.ts`) BEFORE
+ *      `completePhase7Processing`, so a failed insert cannot leave a
+ *      completed row with no queue entry. A `23505` duplicate counts as
+ *      queued. Phase 9's provider, prompt, scoring, and enrichment are
+ *      not touched.
  *   4. On failure (claim error, exhausted retries, unexpected persistence
  *      error): logged and recorded via `recordPhase7ProcessingError`
  *      where a claim exists; the row is left `status: "processing"`
  *      (retryable/reclaimable later) - never a false terminal `LEAD`/
- *      `NOT_A_LEAD`. Never throws out of `processPhase7ForPost` - one
- *      post's failure never aborts the rest of the scan's posts, the same
- *      defensive convention `safelyEnqueueCandidate` already established
- *      for OLD Phase 8.
+ *      `NOT_A_LEAD`. A row-level security or rejected-JWT failure
+ *      (`Phase7ClaimAuthError`) is rethrown so the scan is marked failed
+ *      instead of reported as a success. Other per-post failures never
+ *      throw out of `processPhase7ForPost`.
  *
  * Deliberately out of scope here (see task spec): comment scanning (only
  * `RedditPostItem`s are ever processed - comments are never handed to
@@ -185,13 +189,12 @@ function buildLeadCandidateInput(
 
 /**
  * Hands a `LEAD` post into the EXISTING Phase 9 `enqueueCandidate()` path.
- * Mirrors `safelyEnqueueCandidate`'s OLD Phase 8 defensive convention
- * exactly: a genuine DB insertion error is caught and logged (never
- * retried here, never rethrown) so it can never abort the rest of the
- * scan's posts; a duplicate (`enqueueCandidate` resolving `null`, the
- * existing `23505` convention) is not an error at all.
+ * A duplicate (`enqueueCandidate` resolving `null`, the existing `23505`
+ * convention) is not an error. Any other failure is thrown so the caller
+ * can leave the Phase 7 row unfinished instead of marking it completed
+ * with no queue entry. Authorization failures are not retried here.
  */
-async function safelyEnqueueLead(
+async function enqueueLeadForPhase9(
   userId: string,
   projectId: string,
   post: RedditPostItem,
@@ -220,7 +223,7 @@ async function safelyEnqueueLead(
       `[reddit-phase7-relevance-filter] Failed to hand LEAD candidate ${post.id} to Phase 9 for project ${projectId}:`,
       error,
     );
-    return false;
+    throw error;
   } finally {
     if (metrics) {
       metrics.durationsMs.queue += Date.now() - queueStartedMs;
@@ -243,13 +246,10 @@ export type ProcessPhase7ForPostOptions = {
 };
 
 /**
- * Runs NEW Phase 7 for exactly one Reddit post. Never throws - every
- * expected failure mode (claim error, exhausted AI retries, a completion
- * write failing after a successful AI call) is caught, logged, optionally
- * recorded via `recordPhase7ProcessingError`, and returned as `{ outcome:
- * "error" }` instead, so the caller (`runPhase7RelevanceFilter` below,
- * and ultimately the scan) can keep processing the rest of the posts
- * without interruption.
+ * Runs NEW Phase 7 for exactly one Reddit post. Expected per-post
+ * failures (exhausted AI retries, a completion write failing after a
+ * successful AI call) are caught, logged, and returned as `{ outcome:
+ * "error" }`. A `Phase7ClaimAuthError` is rethrown.
  */
 export async function processPhase7ForPost(
   userId: string,
@@ -282,6 +282,9 @@ export async function processPhase7ForPost(
     if (metrics) {
       metrics.phase7Errors++;
     }
+    if (isPhase7ClaimAuthError(error)) {
+      throw error;
+    }
     return { outcome: "error", message };
   }
 
@@ -302,6 +305,50 @@ export async function processPhase7ForPost(
   // claim.kind === "claimed" - this caller, and only this caller, may now
   // call the AI provider for this (project, reddit item) pair.
   const { row } = claim;
+
+  // A reclaimed row may already have been queued on an earlier attempt
+  // whose completion update did not land. The queue row is the stored
+  // lead verdict, so the relevance model must not run again.
+  if (row.attemptCount > 1) {
+    let alreadyQueued = false;
+    try {
+      alreadyQueued = await hasQueuedRedditItemForProject(projectId, post.id);
+    } catch (error) {
+      if (isPhase7ClaimAuthError(error)) {
+        throw error;
+      }
+      const message =
+        error instanceof Error ? error.message : "Unknown error looking up the Phase 9 queue.";
+      if (metrics) {
+        metrics.phase7Errors++;
+      }
+      return { outcome: "error", message };
+    }
+    if (alreadyQueued) {
+      try {
+        await completePhase7Processing(row.id, "lead");
+      } catch (error) {
+        if (metrics) {
+          metrics.phase7Errors++;
+        }
+        const message =
+          error instanceof Error ? error.message : "Unknown error completing Phase 7 processing.";
+        console.error(
+          `[reddit-phase7-relevance-filter] Failed to persist the Phase 7 outcome for ${post.id} (project ${projectId}):`,
+          error,
+        );
+        if (isPhase7ClaimAuthError(error)) {
+          throw error;
+        }
+        return { outcome: "error", message };
+      }
+      if (metrics) {
+        metrics.phase7Leads++;
+      }
+      return { outcome: "lead", enqueued: true };
+    }
+  }
+
   const relevanceInput = buildRelevanceFilterInput(post, project);
 
   let result: RelevanceFilterOutcome;
@@ -324,6 +371,9 @@ export async function processPhase7ForPost(
       // this row remains retryable/reclaimable later.
       await recordPhase7ProcessingError(row.id, message);
     } catch (persistError) {
+      if (isPhase7ClaimAuthError(persistError)) {
+        throw persistError;
+      }
       console.error(
         `[reddit-phase7-relevance-filter] Failed to record the Phase 7 error for row ${row.id}:`,
         persistError,
@@ -333,6 +383,56 @@ export async function processPhase7ForPost(
   }
   if (metrics) {
     metrics.durationsMs.phase7 += Date.now() - aiStartedMs;
+  }
+
+  if (result === "not_a_lead") {
+    try {
+      await completePhase7Processing(row.id, result);
+    } catch (error) {
+      if (metrics) {
+        metrics.phase7Errors++;
+      }
+      const message =
+        error instanceof Error ? error.message : "Unknown error completing Phase 7 processing.";
+      console.error(
+        `[reddit-phase7-relevance-filter] Failed to persist the Phase 7 outcome for ${post.id} (project ${projectId}):`,
+        error,
+      );
+      if (isPhase7ClaimAuthError(error)) {
+        throw error;
+      }
+      return { outcome: "error", message };
+    }
+    if (metrics) {
+      metrics.phase7NotALead++;
+    }
+    return { outcome: "not_a_lead" };
+  }
+
+  // Enqueue before completion. A failed insert must not leave this row
+  // `completed`, or the next scan would treat it as already processed and
+  // never queue it. A 23505 duplicate is success: the queue row exists.
+  let enqueued: boolean;
+  try {
+    enqueued = await enqueueLeadForPhase9(userId, projectId, post, metrics, bucket);
+  } catch (error) {
+    if (isPhase7ClaimAuthError(error)) {
+      throw error;
+    }
+    const message =
+      error instanceof Error ? error.message : "Unknown error queueing the Phase 7 lead.";
+    try {
+      await recordPhase7ProcessingError(row.id, message);
+    } catch (persistError) {
+      if (isPhase7ClaimAuthError(persistError)) {
+        throw persistError;
+      }
+      console.error(
+        `[reddit-phase7-relevance-filter] Failed to record the Phase 7 queue error for row ${row.id}:`,
+        persistError,
+      );
+    }
+    return { outcome: "error", message };
   }
 
   try {
@@ -347,21 +447,16 @@ export async function processPhase7ForPost(
       `[reddit-phase7-relevance-filter] Failed to persist the Phase 7 outcome for ${post.id} (project ${projectId}):`,
       error,
     );
-    return { outcome: "error", message };
-  }
-
-  if (result === "not_a_lead") {
-    if (metrics) {
-      metrics.phase7NotALead++;
+    if (isPhase7ClaimAuthError(error)) {
+      throw error;
     }
-    return { outcome: "not_a_lead" };
+    return { outcome: "error", message };
   }
 
   if (metrics) {
     metrics.phase7Leads++;
   }
 
-  const enqueued = await safelyEnqueueLead(userId, projectId, post, metrics, bucket);
   return { outcome: "lead", enqueued };
 }
 

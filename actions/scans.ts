@@ -4,6 +4,7 @@ import { after } from "next/server";
 
 import { getCompletedScanRedirect } from "@/lib/scans/scan-progress";
 import { createClient } from "@/lib/supabase/server";
+import { resolvePollingUserId, resolveScanAccessToken } from "@/lib/supabase/scan-session";
 import { countProjectQueueRowsSince } from "@/services/gemini-qualification-queue";
 import { getProjectScanData } from "@/services/projects";
 import { runProjectScan } from "@/services/scan-orchestrator";
@@ -29,7 +30,7 @@ export type ProjectScanStatus = {
 
 export type ProjectScanStatusResult =
   | { ok: true; data: ProjectScanStatus }
-  | { ok: false; error: string };
+  | { ok: false; error: string; retryable?: boolean };
 
 /**
  * Authenticated first-scan start. Creates a `sync_logs` running row and
@@ -38,31 +39,31 @@ export type ProjectScanStatusResult =
  */
 export async function startProjectScanAction(projectId: string): Promise<StartProjectScanResult> {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const access = await resolveScanAccessToken(supabase.auth);
 
-  if (!user) {
-    return { ok: false, error: "You must be signed in to start a scan." };
+  if (!access.ok) {
+    return { ok: false, error: access.error };
   }
 
-  const project = await getProjectScanData(user.id, projectId);
+  const project = await getProjectScanData(access.userId, projectId);
   if (!project) {
     return { ok: false, error: "Project not found." };
   }
 
-  const running = await getBlockingRunningScan(user.id, projectId);
+  const running = await getBlockingRunningScan(access.userId, projectId);
   if (running) {
     return { ok: false, error: "A scan is already running for this project." };
   }
 
-  const log = await insertRunningScan(user.id, projectId);
+  const log = await insertRunningScan(access.userId, projectId);
+  const accessToken = access.accessToken;
 
   after(() => {
     void runProjectScan({
-      userId: user.id,
+      userId: access.userId,
       projectId,
       syncLogId: log.id,
+      accessToken,
     });
   });
 
@@ -78,20 +79,18 @@ export async function getProjectScanStatusAction(
   projectId: string,
 ): Promise<ProjectScanStatusResult> {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const access = await resolvePollingUserId(supabase.auth);
 
-  if (!user) {
-    return { ok: false, error: "You must be signed in to view scan status." };
+  if (!access.ok) {
+    return { ok: false, error: access.error, retryable: access.retryable };
   }
 
-  const project = await getProjectScanData(user.id, projectId);
+  const project = await getProjectScanData(access.userId, projectId);
   if (!project) {
     return { ok: false, error: "Project not found." };
   }
 
-  const latest = await getLatestScan(user.id, projectId);
+  const latest = await getLatestScan(access.userId, projectId);
   let hasQueueRowsSinceStart = false;
 
   if (latest?.status === "running") {
