@@ -238,25 +238,19 @@ Write a concise 1–2 sentence explanation of why the existing aiMatchType and a
 
 ### aiPossibleCompetitor
 
-Independently check whether the Reddit content shows credible competitive behaviour.
+Independently identify credible competitors using the customer's business context and the full Reddit title and body. A competitor offers a product or service meaningfully similar to the customer's business.
 
-Competitive behaviour includes things such as designing, building, launching, marketing, promoting, or operating a product or service that is meaningfully similar to the customer's business.
+This includes businesses demonstrating competitive behaviour (designing, building, launching, marketing, promoting, or operating a similar offering) and named businesses, products, or services mentioned by Reddit authors that meaningfully overlap with the customer's offering, including existing providers the author uses, compares, complains about, or wants to replace.
 
-This is a separate signal from lead qualification. It must NOT increase or decrease aiScore or determine aiQualified.
+If a competitor is named in the post, return its actual name. If credible competitive behaviour is evident but no name is identifiable, return "Potential Competitor". Otherwise, return null.
 
-If a competing company or product is clearly identified in the post, return its actual name.
-
-If the post clearly shows competitive behaviour but no company or product name is identifiable, return "Potential Competitor".
-
-If there is no credible competitive behaviour, return null.
-
-Never invent or guess a competitor name. The customer's competitor list is only background context and is not evidence by itself.
+Competitor detection is independent of aiScore, aiQualified, and aiMatchType. Never guess a name or flag a business based only on an incidental mention or the customer's competitor list.
 
 Only customer-visible enrichment is generated for aiScore 5–10. Therefore, competitive behaviour must not be shown to the customer when aiScore is below 5.
 
 ### aiPossibleCompetitorReason
 
-If aiPossibleCompetitor is not null, briefly explain the specific competitive behaviour found in the Reddit content.
+If aiPossibleCompetitor is not null, briefly explain why it is a possible competitor, citing the relevant competitive behaviour or meaningful service overlap in the Reddit content. Keep the reason concise and evidence-based.
 
 If aiPossibleCompetitor is null, return null.
 
