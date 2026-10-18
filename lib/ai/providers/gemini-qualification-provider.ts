@@ -246,6 +246,8 @@ If a competitor is named in the post, return its actual name. If credible compet
 
 Competitor detection is independent of aiScore, aiQualified, and aiMatchType. Never guess a name or flag a business based only on an incidental mention or the customer's competitor list.
 
+Never invent or guess a competitor's name. The customer's competitor list is background context only, not evidence that a competitor is present in the Reddit post. Return a named competitor only when the Reddit content itself provides sufficient evidence to identify it as relevant to the customer's business.
+
 Only customer-visible enrichment is generated for aiScore 5–10. Therefore, competitive behaviour must not be shown to the customer when aiScore is below 5.
 
 ### aiPossibleCompetitorReason
