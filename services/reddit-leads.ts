@@ -1,5 +1,10 @@
 import "server-only";
 
+import {
+  representativeLeadRows,
+  selectDisplayedLeadRows,
+  type ComparableLeadRow,
+} from "@/lib/leads/display-dedupe";
 import { createClient } from "@/lib/supabase/server";
 import type { GeminiQueueItemType } from "@/types/gemini-qualification-queue";
 import type {
@@ -24,6 +29,154 @@ import type {
 
 const LEAD_COLUMNS =
   "id, project_id, user_id, reddit_item_id, item_type, parent_post_id, subreddit, title, content, author, author_id, permalink, score, num_comments, item_created_at, ai_score, ai_match_type, ai_lead_summary, ai_match_reason, ai_possible_competitor, ai_possible_competitor_reason, safety_badge, safety_explanation, status, created_at, updated_at";
+
+const LEAD_STATS_COLUMNS = "id, project_id, author_id, title, content, ai_score, created_at, status";
+
+/** PostgREST page size. Rows are read until the exact count is reached, then deduped. */
+export const LEAD_READ_PAGE_SIZE = 1000;
+
+type LeadSupabase = Awaited<ReturnType<typeof createClient>>;
+
+type LeadReadError = {
+  message: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+};
+
+type LeadReadPage = {
+  data: unknown;
+  error: LeadReadError | null;
+  count?: number | null;
+};
+
+type PageableLeadQuery = {
+  order: (
+    column: string,
+    options: { ascending: boolean },
+  ) => {
+    range: (from: number, to: number) => PromiseLike<LeadReadPage>;
+  };
+};
+
+type LeadStatRow = ComparableLeadRow & { status: unknown };
+
+function buildProjectLeadQuery(
+  supabase: LeadSupabase,
+  userId: string,
+  projectId: string,
+  columns: string,
+  options: ListLeadsOptions = {},
+): PageableLeadQuery {
+  const matchFilters = options.matchFilters ?? [];
+  const wantsStrong = matchFilters.includes("strong");
+  const wantsPartial = matchFilters.includes("partial");
+
+  let query = supabase
+    .from("reddit_leads")
+    .select(columns, { count: "exact" })
+    .eq("user_id", userId)
+    .eq("project_id", projectId);
+
+  if (wantsStrong && !wantsPartial) {
+    query = query.gte("ai_score", 8);
+  } else if (wantsPartial && !wantsStrong) {
+    query = query.gte("ai_score", 6).lte("ai_score", 7);
+  } else if (wantsStrong && wantsPartial) {
+    query = query.gte("ai_score", 6);
+  }
+
+  if (options.dateFrom) {
+    query = query.gte("item_created_at", options.dateFrom);
+  }
+  if (options.dateTo) {
+    query = query.lte("item_created_at", options.dateTo);
+  }
+
+  return query as unknown as PageableLeadQuery;
+}
+
+function leadRowId(row: unknown): string | null {
+  if (typeof row !== "object" || row === null || !("id" in row)) {
+    return null;
+  }
+  const id = row.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * Reads every filtered row for one owned project. Pages by primary key so a
+ * response cap cannot split a duplicate group or stop the preview early.
+ * A short page while `count` says more rows remain is treated as that cap,
+ * and the next page continues at the following offset.
+ */
+async function fetchEveryMatchingLeadRow(
+  buildFilteredQuery: () => PageableLeadQuery,
+  logLabel: string,
+  failureMessage: string,
+): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  const seenIds = new Set<string>();
+  let offset = 0;
+  let pageSize = LEAD_READ_PAGE_SIZE;
+  let total: number | null = null;
+
+  for (;;) {
+    const { data, error, count } = await buildFilteredQuery()
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+
+    if (error) {
+      console.error(`${logLabel} Supabase error:`, {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      throw new Error(failureMessage);
+    }
+
+    if (total === null && typeof count === "number") {
+      total = count;
+    }
+
+    const batch = Array.isArray(data) ? data : [];
+    if (batch.length === 0) {
+      break;
+    }
+
+    let freshCount = 0;
+    for (const row of batch) {
+      const id = leadRowId(row);
+      if (id !== null) {
+        if (seenIds.has(id)) {
+          continue;
+        }
+        seenIds.add(id);
+      }
+      rows.push(row);
+      freshCount += 1;
+    }
+
+    if (freshCount === 0) {
+      break;
+    }
+
+    offset += batch.length;
+    if (total !== null && offset >= total) {
+      break;
+    }
+    if (batch.length < pageSize) {
+      if (total !== null && offset < total) {
+        pageSize = batch.length;
+        continue;
+      }
+      break;
+    }
+  }
+
+  return rows;
+}
 
 type LeadRowRecord = {
   id: unknown;
@@ -182,8 +335,10 @@ export async function persistQualifiedLead(input: PersistQualifiedLeadInput): Pr
 
 /**
  * Lists customer-facing qualified leads for one project owned by `userId`.
- * Default sort is newest Reddit item first (`item_created_at` desc), which
- * uses the existing `(project_id, item_created_at desc)` index.
+ * Duplicate display groups are collapsed after the existing score and date
+ * filters. Representatives are then ordered (newest Reddit item by default)
+ * and `options.limit` is applied to that list. The dashboard preview passes
+ * `limit: 4`.
  */
 export async function listLeadsByProject(
   userId: string,
@@ -191,63 +346,16 @@ export async function listLeadsByProject(
   options: ListLeadsOptions = {},
 ): Promise<RedditLeadRow[]> {
   const supabase = await createClient();
-  const sort = options.sort ?? "newest";
-  const matchFilters = options.matchFilters ?? [];
-  const wantsStrong = matchFilters.includes("strong");
-  const wantsPartial = matchFilters.includes("partial");
+  const rows = await fetchEveryMatchingLeadRow(
+    () => buildProjectLeadQuery(supabase, userId, projectId, LEAD_COLUMNS, options),
+    "listLeadsByProject",
+    "Failed to load leads.",
+  );
 
-  let query = supabase
-    .from("reddit_leads")
-    .select(LEAD_COLUMNS)
-    .eq("user_id", userId)
-    .eq("project_id", projectId);
-
-  if (wantsStrong && !wantsPartial) {
-    query = query.gte("ai_score", 8);
-  } else if (wantsPartial && !wantsStrong) {
-    query = query.gte("ai_score", 6).lte("ai_score", 7);
-  } else if (wantsStrong && wantsPartial) {
-    query = query.gte("ai_score", 6);
-  }
-
-  if (options.dateFrom) {
-    query = query.gte("item_created_at", options.dateFrom);
-  }
-  if (options.dateTo) {
-    query = query.lte("item_created_at", options.dateTo);
-  }
-
-  if (sort === "oldest") {
-    query = query.order("item_created_at", { ascending: true });
-  } else if (sort === "highest_score") {
-    query = query
-      .order("ai_score", { ascending: false })
-      .order("item_created_at", { ascending: false });
-  } else if (sort === "lowest_score") {
-    query = query
-      .order("ai_score", { ascending: true })
-      .order("item_created_at", { ascending: false });
-  } else {
-    query = query.order("item_created_at", { ascending: false });
-  }
-
-  if (options.limit !== undefined) {
-    query = query.limit(options.limit);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    console.error("listLeadsByProject Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to load leads.");
-  }
-
-  return ((data ?? []) as LeadRowRecord[]).map(mapRowToLeadRow);
+  return selectDisplayedLeadRows(rows as LeadRowRecord[], {
+    sort: options.sort ?? "newest",
+    limit: options.limit,
+  }).map(mapRowToLeadRow);
 }
 
 /**
@@ -283,29 +391,18 @@ export async function countLeadsCreatedSince(
 }
 
 /**
- * Simple Dashboard counts for one project. Computed in-process from a
- * narrow `status`/`ai_score` select so we do not add extra schema or RPCs.
+ * Dashboard counts for one project. Each duplicate display group contributes
+ * its representative, using that row's status and AI score. `reviewed` and
+ * `ignored` still count only toward the total.
  */
 export async function getLeadStats(userId: string, projectId: string): Promise<LeadStats> {
   const supabase = await createClient();
-
-  const { data, error } = await supabase
-    .from("reddit_leads")
-    .select("status, ai_score")
-    .eq("user_id", userId)
-    .eq("project_id", projectId);
-
-  if (error) {
-    console.error("getLeadStats Supabase error:", {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-    });
-    throw new Error("Failed to load lead stats.");
-  }
-
-  const rows = (data ?? []) as { status: unknown; ai_score: unknown }[];
+  const data = await fetchEveryMatchingLeadRow(
+    () => buildProjectLeadQuery(supabase, userId, projectId, LEAD_STATS_COLUMNS),
+    "getLeadStats",
+    "Failed to load lead stats.",
+  );
+  const rows = representativeLeadRows(data as LeadStatRow[]);
   const stats: LeadStats = {
     total: rows.length,
     newCount: 0,

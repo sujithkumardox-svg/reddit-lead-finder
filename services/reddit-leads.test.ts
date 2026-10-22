@@ -14,6 +14,7 @@ vi.mock("@/lib/supabase/server", () => ({
 
 import { createClient } from "@/lib/supabase/server";
 import {
+  LEAD_READ_PAGE_SIZE,
   deleteLead,
   getLeadStats,
   listLeadsByProject,
@@ -39,12 +40,41 @@ function createChain(result: { data: unknown; error: unknown; count?: number | n
     lte: vi.fn(() => chain),
     order: vi.fn(() => chain),
     limit: vi.fn(() => chain),
+    range: vi.fn(() => chain),
     maybeSingle: vi.fn(() => Promise.resolve(result)),
     then: (
       onFulfilled: (value: typeof result) => unknown,
       onRejected?: (reason: unknown) => unknown,
     ) => Promise.resolve(result).then(onFulfilled, onRejected),
   };
+  return chain;
+}
+
+function createRangedChain(rows: unknown[], cap?: number) {
+  let start = 0;
+  let end = -1;
+  const chain: Record<string, unknown> = {};
+  Object.assign(chain, {
+    select: vi.fn(() => chain),
+    eq: vi.fn(() => chain),
+    gte: vi.fn(() => chain),
+    lte: vi.fn(() => chain),
+    order: vi.fn(() => chain),
+    limit: vi.fn(() => chain),
+    range: vi.fn((from: number, to: number) => {
+      start = from;
+      end = to;
+      return chain;
+    }),
+    then: (onFulfilled: (value: { data: unknown[]; error: null; count: number }) => unknown) => {
+      const page = rows.slice(start, end + 1);
+      return Promise.resolve({
+        data: cap === undefined ? page : page.slice(0, cap),
+        error: null,
+        count: rows.length,
+      }).then(onFulfilled);
+    },
+  });
   return chain;
 }
 
@@ -282,10 +312,16 @@ describe("listLeadsByProject", () => {
     const leads = await listLeadsByProject("user-1", "project-1");
 
     expect(from).toHaveBeenCalledWith("reddit_leads");
-    expect(chain.select).toHaveBeenCalledWith(expect.stringContaining("reddit_item_id"));
+    expect(chain.select).toHaveBeenCalledWith(expect.stringContaining("reddit_item_id"), {
+      count: "exact",
+    });
     expect(chain.eq).toHaveBeenCalledWith("user_id", "user-1");
     expect(chain.eq).toHaveBeenCalledWith("project_id", "project-1");
-    expect(chain.order).toHaveBeenCalledWith("item_created_at", { ascending: false });
+    expect(chain.order).toHaveBeenCalledWith("id", { ascending: true });
+    expect(chain.limit).not.toHaveBeenCalled();
+    expect(chain.update).not.toHaveBeenCalled();
+    expect(chain.delete).not.toHaveBeenCalled();
+    expect(chain.upsert).not.toHaveBeenCalled();
     expect(leads).toHaveLength(1);
     expect(leads[0]).toMatchObject({
       id: "lead-1",
@@ -336,7 +372,7 @@ describe("listLeadsByProject", () => {
     expect(partialChain.lte).toHaveBeenCalledWith("ai_score", 7);
   });
 
-  it("4. filters by item_created_at range and supports score sorts", async () => {
+  it("4. keeps date filters on the query and does not apply the preview limit in SQL", async () => {
     const chain = createChain({ data: [], error: null });
     mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
 
@@ -349,8 +385,121 @@ describe("listLeadsByProject", () => {
 
     expect(chain.gte).toHaveBeenCalledWith("item_created_at", "2026-08-01T00:00:00.000Z");
     expect(chain.lte).toHaveBeenCalledWith("item_created_at", "2026-08-02T00:00:00.000Z");
-    expect(chain.order).toHaveBeenCalledWith("ai_score", { ascending: false });
-    expect(chain.limit).toHaveBeenCalledWith(5);
+    expect(chain.order).toHaveBeenCalledWith("id", { ascending: true });
+    expect(chain.limit).not.toHaveBeenCalled();
+  });
+
+  it("5b. collapses duplicates after the read and keeps the four-lead preview on representatives", async () => {
+    const duplicates = [1, 2, 3, 4].map((day) =>
+      makeDbLeadRow({
+        id: `dup-${day}`,
+        reddit_item_id: `t3_dup${day}`,
+        title: "Same post",
+        content: "Same body",
+        ai_score: day === 4 ? 9 : 6,
+        created_at: `2026-07-0${day}T00:00:00.000Z`,
+        item_created_at: `2026-09-0${day}T00:00:00.000Z`,
+        permalink: `https://reddit.com/dup-${day}`,
+        ai_match_type: `type-${day}`,
+        ai_lead_summary: `Summary ${day}`,
+      }),
+    );
+    const others = [1, 2, 3, 4].map((day) =>
+      makeDbLeadRow({
+        id: `other-${day}`,
+        reddit_item_id: `t3_other${day}`,
+        title: `Other ${day}`,
+        content: `Body ${day}`,
+        ai_score: 8,
+        item_created_at: `2026-08-0${day}T00:00:00.000Z`,
+      }),
+    );
+    const chain = createChain({ data: [...duplicates, ...others], error: null });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const leads = await listLeadsByProject("user-1", "project-1", { sort: "newest", limit: 4 });
+
+    expect(leads.map((lead) => lead.id)).toEqual(["dup-4", "other-4", "other-3", "other-2"]);
+    expect(leads[0]).toMatchObject({
+      title: "Same post",
+      content: "Same body",
+      permalink: "https://reddit.com/dup-4",
+      aiScore: 9,
+      aiMatchType: "type-4",
+      aiLeadSummary: "Summary 4",
+    });
+    expect(chain.limit).not.toHaveBeenCalled();
+  });
+
+  it("5c. reads a later page when the exact count is larger than one response", async () => {
+    const rows = Array.from({ length: LEAD_READ_PAGE_SIZE + 1 }, (_, index) =>
+      makeDbLeadRow({
+        id: `lead-${index}`,
+        reddit_item_id: `t3_${index}`,
+        title: `Title ${index}`,
+        content: `Body ${index}`,
+      }),
+    );
+    const chain = createRangedChain(rows);
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const leads = await listLeadsByProject("user-1", "project-1");
+
+    expect(chain.range).toHaveBeenNthCalledWith(1, 0, LEAD_READ_PAGE_SIZE - 1);
+    expect(chain.range).toHaveBeenNthCalledWith(2, LEAD_READ_PAGE_SIZE, LEAD_READ_PAGE_SIZE * 2 - 1);
+    expect(leads).toHaveLength(LEAD_READ_PAGE_SIZE + 1);
+  });
+
+  it("5d. continues past a short response cap until the exact count is read", async () => {
+    const rows = [1, 2, 3, 4, 5].map((index) =>
+      makeDbLeadRow({
+        id: `capped-${index}`,
+        reddit_item_id: `t3_capped${index}`,
+        title: `Capped ${index}`,
+        content: `Body ${index}`,
+      }),
+    );
+    const chain = createRangedChain(rows, 2);
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const leads = await listLeadsByProject("user-1", "project-1", { sort: "oldest" });
+
+    expect(leads.map((lead) => lead.id)).toEqual([
+      "capped-1",
+      "capped-2",
+      "capped-3",
+      "capped-4",
+      "capped-5",
+    ]);
+    expect(chain.range).toHaveBeenNthCalledWith(1, 0, LEAD_READ_PAGE_SIZE - 1);
+    expect(chain.range).toHaveBeenNthCalledWith(2, 2, 3);
+  });
+
+  it("5e. collapses a duplicate group split across read pages", async () => {
+    const rows = Array.from({ length: LEAD_READ_PAGE_SIZE + 1 }, (_, index) =>
+      makeDbLeadRow({
+        id: `page-${index}`,
+        reddit_item_id: `t3_page${index}`,
+        title: index === 0 || index === LEAD_READ_PAGE_SIZE ? "Shared title" : `Title ${index}`,
+        content: index === 0 || index === LEAD_READ_PAGE_SIZE ? "Shared body" : `Body ${index}`,
+        ai_score: index === LEAD_READ_PAGE_SIZE ? 10 : 7,
+        created_at: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const chain = createRangedChain(rows);
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const leads = await listLeadsByProject("user-1", "project-1");
+    const shared = leads.filter((lead) => lead.title === "Shared title");
+
+    expect(leads).toHaveLength(LEAD_READ_PAGE_SIZE);
+    expect(shared).toHaveLength(1);
+    expect(shared[0]).toMatchObject({
+      id: `page-${LEAD_READ_PAGE_SIZE}`,
+      title: "Shared title",
+      content: "Shared body",
+      aiScore: 10,
+    });
   });
 
   it("5. null-safe maps missing author/content/safety fields", async () => {
@@ -390,10 +539,10 @@ describe("getLeadStats", () => {
   it("counts total, new, contacted, strong (8-10), and partial (6-7)", async () => {
     const chain = createChain({
       data: [
-        { status: "new", ai_score: 9 },
-        { status: "new", ai_score: 10 },
-        { status: "contacted", ai_score: 6 },
-        { status: "contacted", ai_score: 7 },
+        statRow({ id: "a", status: "new", ai_score: 9, title: "Alpha", content: "Body alpha" }),
+        statRow({ id: "b", status: "new", ai_score: 10, title: "Beta", content: "Body beta" }),
+        statRow({ id: "c", status: "contacted", ai_score: 6, title: "Gamma", content: "Body gamma" }),
+        statRow({ id: "d", status: "contacted", ai_score: 7, title: "Delta", content: "Body delta" }),
       ],
       error: null,
     });
@@ -401,7 +550,10 @@ describe("getLeadStats", () => {
 
     const stats = await getLeadStats("user-1", "project-1");
 
-    expect(chain.select).toHaveBeenCalledWith("status, ai_score");
+    expect(chain.select).toHaveBeenCalledWith(
+      "id, project_id, author_id, title, content, ai_score, created_at, status",
+      { count: "exact" },
+    );
     expect(chain.eq).toHaveBeenCalledWith("user_id", "user-1");
     expect(chain.eq).toHaveBeenCalledWith("project_id", "project-1");
     expect(stats).toEqual({
@@ -412,7 +564,58 @@ describe("getLeadStats", () => {
       partialCount: 2,
     });
   });
+
+  it("counts one representative for a duplicate group", async () => {
+    const duplicates = [9, 8, 7, 6, 5].map((score, index) =>
+      statRow({
+        id: `dup-${index}`,
+        status: index === 3 ? "contacted" : "new",
+        ai_score: score,
+        title: "Same post",
+        content: "Same body",
+        created_at: `2026-08-0${index + 1}T00:00:00.000Z`,
+      }),
+    );
+    const chain = createChain({
+      data: [
+        ...duplicates,
+        statRow({
+          id: "partial",
+          status: "contacted",
+          ai_score: 6,
+          title: "Another post",
+          content: "Another body",
+        }),
+      ],
+      error: null,
+    });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => chain) } as never);
+
+    const stats = await getLeadStats("user-1", "project-1");
+
+    expect(stats).toEqual({
+      total: 2,
+      newCount: 1,
+      contactedCount: 1,
+      strongCount: 1,
+      partialCount: 1,
+    });
+  });
 });
+
+function statRow(overrides: Record<string, unknown>) {
+  return {
+    id: "stat-1",
+    project_id: "project-1",
+    author_id: "t2_author",
+    title: "A lead",
+    content: "A body",
+    ai_score: 8,
+    created_at: "2026-08-01T00:00:00.000Z",
+    status: "new",
+    ...overrides,
+  };
+}
 
 describe("updateLeadStatus", () => {
   it("updates status scoped to user, project, and lead id", async () => {
