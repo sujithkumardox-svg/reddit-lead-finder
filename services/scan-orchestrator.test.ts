@@ -236,6 +236,36 @@ describe("runProjectScan", () => {
     );
   });
 
+  it("marks the scan failed when a retried lead save fails again", async () => {
+    mockedRunWorker.mockResolvedValueOnce({
+      processed: 0,
+      qualified: 0,
+      failed: 0,
+      geminiCallsPerformed: 0,
+      geminiDuplicateSkips: 1,
+      geminiErrors: 0,
+      strong8to10: 0,
+      partial6to7: 0,
+      notQualified0to5: 0,
+      leadsPersisted: 0,
+      persistFailed: 1,
+    });
+
+    await runProjectScan({
+      userId: "user-1",
+      projectId: "project-1",
+      syncLogId: "sync-1",
+      accessToken: "scan-access-token",
+    });
+
+    expect(mockedMarkSuccess).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).toHaveBeenCalledWith(
+      "sync-1",
+      "The scan could not save a qualified lead. It can be retried without running qualification again.",
+      expect.objectContaining({ projectId: "project-1", syncLogId: "sync-1" }),
+    );
+  });
+
   it("marks the scan failed when a Phase 7 lead could not be queued", async () => {
     mockedScanProjectReddit.mockImplementationOnce(async (_userId, _projectId, _handler, options) => {
       if (options?.metrics) {

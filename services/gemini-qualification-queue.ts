@@ -27,6 +27,14 @@ const QUEUE_COLUMNS =
 /** Visibility timeout `recoverStaleProcessing` uses when the caller doesn't pass one. */
 const DEFAULT_VISIBILITY_TIMEOUT_MS = 15 * 60 * 1000;
 
+/**
+ * Total claims allowed for a failed row whose Gemini result was never stored.
+ * `claimNextPending` increments `attempt_count` on each claim. Reopening a
+ * row does not reset that counter, so a row that has already been claimed
+ * this many times stays `failed`.
+ */
+export const MAX_QUALIFICATION_ATTEMPTS = 3;
+
 type QueueRowRecord = {
   id: unknown;
   project_id: unknown;
@@ -474,10 +482,12 @@ export async function saveQualificationResult(
 /**
  * Marks a claimed row as `failed` after a future Gemini worker's
  * processing attempt errors out. The row remains in the database
- * (retained, not deleted) so it stays available for retry or inspection.
- * The affected row is read back through the same owner-scoped client.
- * Zero rows is a failure. This update never sets `status` back to
- * `pending`.
+ * (retained, not deleted). A later project-scoped worker run may reopen
+ * it through `reopenEligibleFailedRows` when the row is a stored result
+ * or a non-ambiguous qualification failure still under
+ * `MAX_QUALIFICATION_ATTEMPTS`. This update itself never sets `status`
+ * back to `pending`. The affected row is read back through the same
+ * owner-scoped client. Zero rows is a failure.
  */
 export async function markFailed(id: string, errorMessage: string): Promise<void> {
   const supabase = await createClient();
@@ -634,6 +644,94 @@ export async function recoverStaleProcessing(
   }
 
   return (data ?? []).length;
+}
+
+export type ReopenedFailedRows = {
+  storedResults: number;
+  retryableFailures: number;
+};
+
+/**
+ * Reopens eligible `failed` rows for one project so the next user-started
+ * scan can finish them. Called after `recoverStaleProcessing`.
+ *
+ * The only durable "do not retry" classification already stored on a row
+ * is `AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE`. Ordinary qualification and
+ * enrichment exceptions are stored as their own error text, with
+ * `ai_score` still null, because `recordGeminiResult` did not run. This
+ * function uses that existing distinction. It does not classify error
+ * text any further.
+ *
+ * Case A: `ai_score` is already stored. The row returns to `pending` with
+ * `ai_*` and `gemini_call_attempted_at` untouched, so the worker reuses
+ * the result and does not call Gemini. The attempt cap does not apply:
+ * reopening does not spend another provider call.
+ *
+ * Case B: `ai_score` is null, `error_message` is present and is not the
+ * ambiguous-crash sentinel, and `attempt_count` is still below
+ * `MAX_QUALIFICATION_ATTEMPTS`. The row returns to `pending` without
+ * resetting `attempt_count`. The normal claim path may call Gemini again.
+ * `neq` does not match a null `error_message`, so a failed row with no
+ * recorded reason stays failed.
+ *
+ * Both updates require `status = failed` and this `project_id`. A row
+ * another scan already moved off `failed` matches nothing. Ambiguous
+ * rows are not updated.
+ */
+export async function reopenEligibleFailedRows(projectId: string): Promise<ReopenedFailedRows> {
+  const supabase = await createClient();
+  const reopen = {
+    status: "pending" as const,
+    processing_started_at: null,
+  };
+
+  const { data: storedRows, error: storedError } = await supabase
+    .from("gemini_qualification_queue")
+    .update(reopen)
+    .eq("project_id", projectId)
+    .eq("status", "failed")
+    .not("ai_score", "is", null)
+    .select("id");
+
+  if (storedError) {
+    console.error("reopenEligibleFailedRows Supabase error (stored results):", {
+      message: storedError.message,
+      code: storedError.code,
+      details: storedError.details,
+      hint: storedError.hint,
+    });
+    throw new Error("Failed to reopen stored Gemini results.");
+  }
+
+  const { data: retryableRows, error: retryableError } = await supabase
+    .from("gemini_qualification_queue")
+    .update(reopen)
+    .eq("project_id", projectId)
+    .eq("status", "failed")
+    .is("ai_score", null)
+    .neq("error_message", AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE)
+    .lt("attempt_count", MAX_QUALIFICATION_ATTEMPTS)
+    .select("id");
+
+  if (retryableError) {
+    console.error("reopenEligibleFailedRows Supabase error (retryable failures):", {
+      message: retryableError.message,
+      code: retryableError.code,
+      details: retryableError.details,
+      hint: retryableError.hint,
+    });
+    throw new Error("Failed to reopen retryable qualification failures.");
+  }
+
+  const storedResults = (storedRows ?? []).length;
+  const retryableFailures = (retryableRows ?? []).length;
+  if (storedResults > 0 || retryableFailures > 0) {
+    console.warn(
+      `[gemini-qualification-queue] Reopened ${storedResults} stored-result row(s) and ${retryableFailures} retryable failure(s) for project ${projectId}.`,
+    );
+  }
+
+  return { storedResults, retryableFailures };
 }
 
 /**

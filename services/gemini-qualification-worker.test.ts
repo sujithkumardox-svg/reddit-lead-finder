@@ -14,6 +14,7 @@ vi.mock("@/services/gemini-qualification-queue", () => ({
   markGeminiCallAttempted: vi.fn(),
   recordGeminiResult: vi.fn(),
   recoverStaleProcessing: vi.fn(),
+  reopenEligibleFailedRows: vi.fn(),
   requeueAfterPersistFailure: vi.fn(),
   saveQualificationResult: vi.fn(),
 }));
@@ -52,6 +53,7 @@ import {
   markGeminiCallAttempted,
   recordGeminiResult,
   recoverStaleProcessing,
+  reopenEligibleFailedRows,
   requeueAfterPersistFailure,
   saveQualificationResult,
 } from "@/services/gemini-qualification-queue";
@@ -69,6 +71,7 @@ const mockedMarkFailed = vi.mocked(markFailed);
 const mockedMarkGeminiCallAttempted = vi.mocked(markGeminiCallAttempted);
 const mockedRecordGeminiResult = vi.mocked(recordGeminiResult);
 const mockedRecoverStaleProcessing = vi.mocked(recoverStaleProcessing);
+const mockedReopenEligibleFailedRows = vi.mocked(reopenEligibleFailedRows);
 const mockedSaveQualificationResult = vi.mocked(saveQualificationResult);
 const mockedRequeueAfterPersistFailure = vi.mocked(requeueAfterPersistFailure);
 const mockedGetProjectById = vi.mocked(getProjectById);
@@ -166,6 +169,7 @@ beforeEach(() => {
   mockedPersistQualifiedLead.mockResolvedValue(undefined);
   mockedRecordGeminiResult.mockResolvedValue(undefined);
   mockedMarkGeminiCallAttempted.mockResolvedValue(undefined);
+  mockedReopenEligibleFailedRows.mockResolvedValue({ storedResults: 0, retryableFailures: 0 });
 });
 
 describe("processNextGeminiQualificationCandidate - successful qualification", () => {
@@ -988,6 +992,10 @@ describe("project-scoped worker claiming", () => {
     await runGeminiQualificationWorker({ projectId: "project-a" });
 
     expect(mockedRecoverStaleProcessing).toHaveBeenCalledWith(undefined, "project-a");
+    expect(mockedReopenEligibleFailedRows).toHaveBeenCalledWith("project-a");
+    expect(mockedRecoverStaleProcessing.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedReopenEligibleFailedRows.mock.invocationCallOrder[0],
+    );
     expect(mockedClaimNextPending).toHaveBeenCalledWith("project-a");
   });
 
@@ -1009,7 +1017,208 @@ describe("project-scoped worker claiming", () => {
     await runGeminiQualificationWorker();
 
     expect(mockedRecoverStaleProcessing).toHaveBeenCalledWith(undefined, undefined);
+    expect(mockedReopenEligibleFailedRows).not.toHaveBeenCalled();
     expect(mockedClaimNextPending).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("failed qualification recovery on a later worker run", () => {
+  function storedResultRow(id: string): GeminiQualificationQueueRow {
+    return makeQueueRow({
+      id,
+      attemptCount: 2,
+      errorMessage: "Failed to save Gemini qualification result.",
+      geminiCallAttemptedAt: "2026-08-01T00:02:00.000Z",
+      aiQualified: true,
+      aiScore: 9,
+      aiMatchType: "intent",
+      aiLeadSummary: "Actively looking for a lead-gen tool.",
+      aiMatchReason: "Explicitly asks for recommendations.",
+      aiProvider: "google",
+      aiModel: "gemini-3.5-flash",
+    });
+  }
+
+  it("qualifies a reopened qualification failure on the next run and completes it", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-qualify-fail", attemptCount: 1 }))
+      .mockResolvedValueOnce(null);
+    mockedGetProjectById.mockResolvedValue(makeProject());
+    mockedQualifyRedditCandidate.mockRejectedValueOnce(new Error("Gemini API request failed"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const first = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(first.failed).toBe(1);
+    expect(mockedMarkFailed).toHaveBeenCalledWith("queue-qualify-fail", "Gemini API request failed");
+    expect(mockedMarkFailed).not.toHaveBeenCalledWith(
+      "queue-qualify-fail",
+      AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE,
+    );
+
+    mockedClaimNextPending.mockReset();
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-qualify-fail", attemptCount: 1 }))
+      .mockResolvedValueOnce(null);
+    mockedQualifyRedditCandidate.mockReset();
+    mockedQualifyRedditCandidate.mockResolvedValueOnce(makeQualifyResult({ aiQualified: true, aiScore: 9 }));
+    mockedSaveQualificationResult.mockResolvedValue(undefined);
+    mockedReopenEligibleFailedRows.mockResolvedValue({ storedResults: 0, retryableFailures: 1 });
+
+    const second = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedReopenEligibleFailedRows).toHaveBeenCalledWith("project-a");
+    expect(mockedQualifyRedditCandidate).toHaveBeenCalledTimes(1);
+    expect(mockedPersistQualifiedLead).toHaveBeenCalledTimes(1);
+    expect(mockedSaveQualificationResult).toHaveBeenCalledWith(
+      "queue-qualify-fail",
+      expect.objectContaining({ aiScore: 9 }),
+    );
+    expect(second.processed).toBe(1);
+    expect(second.failed).toBe(0);
+    expect(second.qualified).toBe(1);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("treats an enrichment failure before the result is stored as the same retryable failure", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-enrich-fail", attemptCount: 1 }))
+      .mockResolvedValueOnce(null);
+    mockedGetProjectById.mockResolvedValue(makeProject());
+    mockedQualifyRedditCandidate.mockRejectedValueOnce(new Error("Enrichment request failed"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const first = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(first.failed).toBe(1);
+    expect(mockedMarkFailed).toHaveBeenCalledWith("queue-enrich-fail", "Enrichment request failed");
+    expect(mockedRecordGeminiResult).not.toHaveBeenCalled();
+
+    mockedClaimNextPending.mockReset();
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-enrich-fail", attemptCount: 2 }))
+      .mockResolvedValueOnce(null);
+    mockedQualifyRedditCandidate.mockReset();
+    mockedQualifyRedditCandidate.mockResolvedValueOnce(makeQualifyResult({ aiQualified: true, aiScore: 8 }));
+    mockedSaveQualificationResult.mockResolvedValue(undefined);
+
+    const second = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedQualifyRedditCandidate).toHaveBeenCalledTimes(1);
+    expect(mockedSaveQualificationResult).toHaveBeenCalledWith(
+      "queue-enrich-fail",
+      expect.objectContaining({ aiScore: 8 }),
+    );
+    expect(second.failed).toBe(0);
+    expect(second.processed).toBe(1);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("reuses a stored result on a reopened failed row and does not call Gemini", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedReopenEligibleFailedRows.mockResolvedValue({ storedResults: 1, retryableFailures: 0 });
+    mockedClaimNextPending
+      .mockResolvedValueOnce(storedResultRow("queue-stored"))
+      .mockResolvedValueOnce(null);
+    mockedSaveQualificationResult.mockResolvedValue(undefined);
+
+    const summary = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedQualifyRedditCandidate).not.toHaveBeenCalled();
+    expect(mockedMarkGeminiCallAttempted).not.toHaveBeenCalled();
+    expect(mockedPersistQualifiedLead).toHaveBeenCalledTimes(1);
+    expect(mockedSaveQualificationResult).toHaveBeenCalledWith(
+      "queue-stored",
+      expect.objectContaining({ aiScore: 9, aiProvider: "google" }),
+    );
+    expect(summary.processed).toBe(1);
+    expect(summary.geminiCallsPerformed).toBe(0);
+    expect(summary.geminiDuplicateSkips).toBe(1);
+    expect(summary.failed).toBe(0);
+  });
+
+  it("does not qualify again when a later run finds nothing pending after an ambiguous failure", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-ambiguous" }))
+      .mockResolvedValueOnce(null);
+    mockedGetProjectById.mockResolvedValue(makeProject());
+    mockedQualifyRedditCandidate.mockResolvedValueOnce(makeQualifyResult());
+    mockedRecordGeminiResult.mockRejectedValueOnce(new Error("Failed to record Gemini qualification result."));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const first = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(first.failed).toBe(1);
+    expect(mockedMarkFailed).toHaveBeenCalledWith("queue-ambiguous", AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE);
+
+    mockedClaimNextPending.mockReset();
+    mockedClaimNextPending.mockResolvedValueOnce(null);
+    mockedQualifyRedditCandidate.mockClear();
+
+    const second = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedReopenEligibleFailedRows).toHaveBeenCalledWith("project-a");
+    expect(mockedQualifyRedditCandidate).not.toHaveBeenCalled();
+    expect(second.processed).toBe(0);
+    expect(second.failed).toBe(0);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("fails the later run again when the retried qualification throws", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedReopenEligibleFailedRows.mockResolvedValue({ storedResults: 0, retryableFailures: 1 });
+    mockedClaimNextPending
+      .mockResolvedValueOnce(makeQueueRow({ id: "queue-retry-fail", attemptCount: 2 }))
+      .mockResolvedValueOnce(null);
+    mockedGetProjectById.mockResolvedValue(makeProject());
+    mockedQualifyRedditCandidate.mockRejectedValueOnce(new Error("Gemini API request failed"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const summary = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(summary.failed).toBe(1);
+    expect(summary.processed).toBe(0);
+    expect(mockedMarkFailed).toHaveBeenCalledWith("queue-retry-fail", "Gemini API request failed");
+    expect(mockedSaveQualificationResult).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("requeues a stored result after another lead-save failure and does not call Gemini", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedReopenEligibleFailedRows.mockResolvedValue({ storedResults: 1, retryableFailures: 0 });
+    mockedClaimNextPending
+      .mockResolvedValueOnce(storedResultRow("queue-save-again"))
+      .mockResolvedValueOnce(null);
+    mockedPersistQualifiedLead.mockRejectedValueOnce(new Error("Failed to persist qualified lead."));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const summary = await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedQualifyRedditCandidate).not.toHaveBeenCalled();
+    expect(mockedSaveQualificationResult).not.toHaveBeenCalled();
+    expect(mockedMarkFailed).not.toHaveBeenCalled();
+    expect(mockedRequeueAfterPersistFailure).toHaveBeenCalledWith(
+      "queue-save-again",
+      "Failed to persist qualified lead.",
+    );
+    expect(summary.persistFailed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.processed).toBe(0);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("does not reopen another project's failed rows", async () => {
+    mockedRecoverStaleProcessing.mockResolvedValue(0);
+    mockedClaimNextPending.mockResolvedValueOnce(null);
+
+    await runGeminiQualificationWorker({ projectId: "project-a" });
+
+    expect(mockedReopenEligibleFailedRows).toHaveBeenCalledTimes(1);
+    expect(mockedReopenEligibleFailedRows).toHaveBeenCalledWith("project-a");
+    expect(mockedReopenEligibleFailedRows).not.toHaveBeenCalledWith("project-b");
   });
 });
 

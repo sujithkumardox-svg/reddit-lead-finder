@@ -14,6 +14,7 @@ import {
   markGeminiCallAttempted,
   recordGeminiResult,
   recoverStaleProcessing,
+  reopenEligibleFailedRows,
   requeueAfterPersistFailure,
   saveQualificationResult,
 } from "@/services/gemini-qualification-queue";
@@ -428,13 +429,15 @@ function resolveWorkerOptions(
  * `processing` rows abandoned by a crashed worker once at the start of the
  * run, using the existing visibility-timeout convention already defined by
  * `recoverStaleProcessing` (whose own doc comment anticipates being called
- * "at the start of a worker run").
+ * "at the start of a worker run"). When `projectId` is set, eligible
+ * `failed` rows for that project are then reopened so a later scan can
+ * finish them. Rows for any other project are not reopened.
  *
  * Accepts either the existing positional `maxCandidates` number or an
  * options object `{ projectId?, maxCandidates? }`. When `projectId` is
  * set, recovery and claiming stay scoped to that project so a first-scan
  * never drains another project's pending rows. Omitting it preserves the
- * existing global worker behavior.
+ * existing global worker behavior and does not reopen failed rows.
  *
  * This function is not itself a scheduler - something else (a cron job,
  * route handler, etc.) is expected to invoke it on a schedule.
@@ -446,6 +449,9 @@ export async function runGeminiQualificationWorker(
   const acc = metrics ?? createScanMetrics(projectId ?? "", "");
 
   await recoverStaleProcessing(undefined, projectId);
+  if (projectId) {
+    await reopenEligibleFailedRows(projectId);
+  }
 
   const deferredLeadSaves: { id: string; error: string }[] = [];
   const summary: GeminiQualificationWorkerSummary = {

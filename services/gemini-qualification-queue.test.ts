@@ -18,6 +18,7 @@ vi.mock("@/lib/supabase/server", () => ({
 import { createClient } from "@/lib/supabase/server";
 import {
   AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE,
+  MAX_QUALIFICATION_ATTEMPTS,
   claimNextPending,
   countProjectQueueRowsSince,
   enqueueCandidate,
@@ -27,6 +28,7 @@ import {
   markGeminiCallAttempted,
   recordGeminiResult,
   recoverStaleProcessing,
+  reopenEligibleFailedRows,
   requeueAfterPersistFailure,
   saveQualificationResult,
 } from "@/services/gemini-qualification-queue";
@@ -49,6 +51,7 @@ function createChain(result: { data: unknown; error: unknown }) {
     update: vi.fn(() => chain),
     eq: vi.fn(() => chain),
     lt: vi.fn(() => chain),
+    neq: vi.fn(() => chain),
     not: vi.fn(() => chain),
     is: vi.fn(() => chain),
     gte: vi.fn(() => chain),
@@ -543,6 +546,147 @@ describe("recoverStaleProcessing", () => {
     mockedCreateClient.mockResolvedValue({ from } as never);
 
     await expect(recoverStaleProcessing()).rejects.toThrow("Failed to recover stale Gemini candidates.");
+  });
+});
+
+describe("reopenEligibleFailedRows", () => {
+  function reopenPayload(chain: Record<string, unknown>): Record<string, unknown> {
+    return (chain.update as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
+  }
+
+  it("reopens a stored Gemini result without clearing the result or the attempt marker", async () => {
+    const storedChain = createChain({ data: [{ id: "stored-1" }], error: null });
+    const retryableChain = createChain({ data: [], error: null });
+    const from = vi.fn().mockReturnValueOnce(storedChain).mockReturnValueOnce(retryableChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const reopened = await reopenEligibleFailedRows("project-a");
+
+    expect(reopenPayload(storedChain)).toEqual({
+      status: "pending",
+      processing_started_at: null,
+    });
+    expect(reopenPayload(storedChain)).not.toHaveProperty("ai_score");
+    expect(reopenPayload(storedChain)).not.toHaveProperty("ai_qualified");
+    expect(reopenPayload(storedChain)).not.toHaveProperty("gemini_call_attempted_at");
+    expect(reopenPayload(storedChain)).not.toHaveProperty("attempt_count");
+    expect(reopenPayload(storedChain)).not.toHaveProperty("error_message");
+    expect(storedChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(storedChain.eq).toHaveBeenCalledWith("status", "failed");
+    expect(storedChain.not).toHaveBeenCalledWith("ai_score", "is", null);
+    expect(storedChain.lt).not.toHaveBeenCalled();
+    expect(storedChain.neq).not.toHaveBeenCalled();
+    expect(reopened.storedResults).toBe(1);
+    expect(reopened.retryableFailures).toBe(0);
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("reopens a qualification or enrichment failure that has no stored result and is under the attempt cap", async () => {
+    const storedChain = createChain({ data: [], error: null });
+    const retryableChain = createChain({ data: [{ id: "retry-1" }], error: null });
+    const from = vi.fn().mockReturnValueOnce(storedChain).mockReturnValueOnce(retryableChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const reopened = await reopenEligibleFailedRows("project-a");
+
+    expect(reopenPayload(retryableChain)).toEqual({
+      status: "pending",
+      processing_started_at: null,
+    });
+    expect(reopenPayload(retryableChain)).not.toHaveProperty("attempt_count");
+    expect(reopenPayload(retryableChain)).not.toHaveProperty("gemini_call_attempted_at");
+    expect(retryableChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(retryableChain.eq).toHaveBeenCalledWith("status", "failed");
+    expect(retryableChain.is).toHaveBeenCalledWith("ai_score", null);
+    expect(retryableChain.neq).toHaveBeenCalledWith("error_message", AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE);
+    expect(retryableChain.lt).toHaveBeenCalledWith("attempt_count", MAX_QUALIFICATION_ATTEMPTS);
+    expect(MAX_QUALIFICATION_ATTEMPTS).toBe(3);
+    expect(reopened.retryableFailures).toBe(1);
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("does not match an ambiguous Gemini outcome or a row already at the attempt limit", async () => {
+    const storedChain = createChain({ data: [], error: null });
+    const retryableChain = createChain({ data: [], error: null });
+    const from = vi.fn().mockReturnValueOnce(storedChain).mockReturnValueOnce(retryableChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    const reopened = await reopenEligibleFailedRows("project-a");
+
+    expect(retryableChain.neq).toHaveBeenCalledWith("error_message", AMBIGUOUS_GEMINI_ATTEMPT_MESSAGE);
+    expect(retryableChain.lt).toHaveBeenCalledWith("attempt_count", 3);
+    expect(retryableChain.is).toHaveBeenCalledWith("ai_score", null);
+    expect(storedChain.not).toHaveBeenCalledWith("ai_score", "is", null);
+    expect(reopened).toEqual({ storedResults: 0, retryableFailures: 0 });
+  });
+
+  it("does not reopen failed rows for another project", async () => {
+    const storedChain = createChain({ data: [], error: null });
+    const retryableChain = createChain({ data: [], error: null });
+    const from = vi.fn().mockReturnValueOnce(storedChain).mockReturnValueOnce(retryableChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    await reopenEligibleFailedRows("project-a");
+
+    expect(storedChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(retryableChain.eq).toHaveBeenCalledWith("project_id", "project-a");
+    expect(storedChain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+    expect(retryableChain.eq).not.toHaveBeenCalledWith("project_id", "project-b");
+  });
+
+  it("a repeated recovery still requires status failed, so a row that already left failed is not updated", async () => {
+    const firstStored = createChain({ data: [{ id: "stored-1" }], error: null });
+    const firstRetryable = createChain({ data: [{ id: "retry-1" }], error: null });
+    const secondStored = createChain({ data: [], error: null });
+    const secondRetryable = createChain({ data: [], error: null });
+    const from = vi
+      .fn()
+      .mockReturnValueOnce(firstStored)
+      .mockReturnValueOnce(firstRetryable)
+      .mockReturnValueOnce(secondStored)
+      .mockReturnValueOnce(secondRetryable);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const first = await reopenEligibleFailedRows("project-a");
+    const second = await reopenEligibleFailedRows("project-a");
+
+    for (const chain of [firstStored, firstRetryable, secondStored, secondRetryable]) {
+      expect(chain.eq).toHaveBeenCalledWith("status", "failed");
+      expect(chain.eq).toHaveBeenCalledWith("project_id", "project-a");
+      expect(reopenPayload(chain)).not.toHaveProperty("attempt_count");
+    }
+    expect(first).toEqual({ storedResults: 1, retryableFailures: 1 });
+    expect(second).toEqual({ storedResults: 0, retryableFailures: 0 });
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("throws instead of reporting a stored-result reopen when the update fails", async () => {
+    const storedChain = createChain({
+      data: null,
+      error: { code: "500", message: "boom", details: "", hint: "" },
+    });
+    mockedCreateClient.mockResolvedValue({ from: vi.fn(() => storedChain) } as never);
+
+    await expect(reopenEligibleFailedRows("project-a")).rejects.toThrow(
+      "Failed to reopen stored Gemini results.",
+    );
+  });
+
+  it("throws instead of reporting a retryable reopen when that update fails", async () => {
+    const storedChain = createChain({ data: [], error: null });
+    const retryableChain = createChain({
+      data: null,
+      error: { code: "500", message: "boom", details: "", hint: "" },
+    });
+    const from = vi.fn().mockReturnValueOnce(storedChain).mockReturnValueOnce(retryableChain);
+    mockedCreateClient.mockResolvedValue({ from } as never);
+
+    await expect(reopenEligibleFailedRows("project-a")).rejects.toThrow(
+      "Failed to reopen retryable qualification failures.",
+    );
   });
 });
 
